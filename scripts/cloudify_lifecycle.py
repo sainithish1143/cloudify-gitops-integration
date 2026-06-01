@@ -216,7 +216,10 @@ class CloudifyClient:
 
     def authenticate(self) -> None:
         self.logger.info("Authenticating to Cloudify Manager: %s tenant=%s user=%s", self.req.manager_url, self.req.tenant, self.req.username)
-        response = self._request("POST", "/tokens", json={"username": self.req.username, "password": self.req.password})
+        # Cloudify token API expects HTTP Basic authentication.
+        # Sending username/password only as JSON can fail with:
+        # 401 unauthorized_error: No authentication info provided.
+        response = self._request("POST", "/tokens", auth=(self.req.username, self.req.password))
         self._ensure_ok(response, {200, 201})
         token = response.json().get("value") or response.json().get("token")
         if not token:
