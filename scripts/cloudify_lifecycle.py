@@ -261,12 +261,35 @@ class CloudifyClient:
         return True
 
     def create_blueprint_zip(self) -> Path:
+        """Create a Cloudify-compatible blueprint archive.
+
+        Cloudify expects the uploaded archive to contain exactly one top-level
+        directory. The blueprint files must be inside that directory, for example:
+
+            hello/blueprint.yaml
+            hello/scripts/lifecycle.py
+
+        Zipping only the contents of blueprints/hello directly at archive root
+        causes Cloudify to fail extraction with:
+            "Archive must contain exactly 1 directory".
+        """
         temp_dir = Path(tempfile.mkdtemp(prefix="cfy-bp-"))
         zip_path = temp_dir / f"{self.req.blueprint_id}.zip"
+        top_dir = self.req.blueprint_dir.name
+
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for file_path in self.req.blueprint_dir.rglob("*"):
+            for file_path in sorted(self.req.blueprint_dir.rglob("*")):
                 if file_path.is_file():
-                    archive.write(file_path, file_path.relative_to(self.req.blueprint_dir))
+                    relative = Path(top_dir) / file_path.relative_to(self.req.blueprint_dir)
+                    archive.write(file_path, relative.as_posix())
+
+        # Defensive validation to catch accidental bad archives before calling Cloudify.
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            top_level = {Path(name).parts[0] for name in archive.namelist() if Path(name).parts}
+            if len(top_level) != 1:
+                raise RuntimeError(
+                    f"Invalid blueprint archive {zip_path}: expected exactly one top-level directory, found {sorted(top_level)}"
+                )
         return zip_path
 
     def upload_blueprint(self) -> None:
