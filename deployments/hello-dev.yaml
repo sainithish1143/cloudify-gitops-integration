@@ -5,7 +5,7 @@ metadata:
   name: hello-dev
   environment: dev
   owner: platform-team
-  description: Demo deployment managed through GitOps desired-state reconciliation.
+  description: Demo deployment managed through GitOps desired-state reconciliation test.
 
 spec:
   enabled: true
