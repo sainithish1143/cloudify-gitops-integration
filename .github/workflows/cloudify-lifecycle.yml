@@ -1,0 +1,80 @@
+name: Cloudify Lifecycle GitOps
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_file:
+        description: "Cloudify lifecycle request YAML"
+        required: true
+        default: "requests/hello-dev-install.yaml"
+
+  push:
+    paths:
+      - "requests/**"
+      - "blueprints/**"
+      - "inputs/**"
+      - "scripts/cloudify_lifecycle.py"
+      - ".github/workflows/cloudify-lifecycle.yml"
+
+jobs:
+  cloudify-lifecycle:
+    name: Execute Cloudify lifecycle
+    runs-on: ubuntu-latest
+
+    env:
+      CFY_MANAGER_URL: ${{ secrets.CFY_MANAGER_URL }}
+      CFY_USERNAME: ${{ secrets.CFY_USERNAME }}
+      CFY_PASSWORD: ${{ secrets.CFY_PASSWORD }}
+      CFY_TENANT: ${{ secrets.CFY_TENANT }}
+      CFY_API_VERSION: ${{ vars.CFY_API_VERSION || 'v3.1' }}
+      CFY_INSECURE: ${{ vars.CFY_INSECURE || 'true' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate required secrets
+        run: |
+          test -n "$CFY_MANAGER_URL" || (echo "CFY_MANAGER_URL is missing" && exit 1)
+          test -n "$CFY_USERNAME" || (echo "CFY_USERNAME is missing" && exit 1)
+          test -n "$CFY_PASSWORD" || (echo "CFY_PASSWORD is missing" && exit 1)
+          test -n "$CFY_TENANT" || (echo "CFY_TENANT is missing" && exit 1)
+
+      - name: Select request file
+        id: select_request
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REQUEST_FILE="${{ github.event.inputs.request_file }}"
+          else
+            REQUEST_FILE="$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '^requests/.*\.ya\?ml$' | head -1 || true)"
+            if [ -z "$REQUEST_FILE" ]; then
+              REQUEST_FILE="requests/hello-dev-install.yaml"
+            fi
+          fi
+
+          echo "Selected request file: $REQUEST_FILE"
+          test -f "$REQUEST_FILE" || (echo "Request file not found: $REQUEST_FILE" && exit 1)
+          echo "request_file=$REQUEST_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Execute Cloudify lifecycle
+        run: |
+          python3 scripts/cloudify_lifecycle.py --request "${{ steps.select_request.outputs.request_file }}"
+
+      - name: Upload lifecycle logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudify-lifecycle-logs
+          path: logs/
+          if-no-files-found: ignore
