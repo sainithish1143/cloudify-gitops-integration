@@ -1,0 +1,103 @@
+name: Cloudify Desired-State GitOps
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_file:
+        description: "Deployment desired-state file"
+        required: true
+        default: "deployments/hello-dev.yaml"
+      operation:
+        description: "Lifecycle operation for manual run"
+        required: true
+        default: "install"
+        type: choice
+        options:
+          - install
+          - update
+          - uninstall
+      dry_run:
+        description: "Validate only; do not call Cloudify"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+  push:
+    paths:
+      - "deployments/**"
+      - "blueprints/**"
+      - "inputs/**"
+      - "scripts/**"
+      - ".github/workflows/cloudify-desired-state.yml"
+
+jobs:
+  reconcile:
+    name: Reconcile Cloudify desired state
+    runs-on: self-hosted
+
+    env:
+      CFY_MANAGER_URL: ${{ secrets.CFY_MANAGER_URL }}
+      CFY_USERNAME: ${{ secrets.CFY_USERNAME }}
+      CFY_PASSWORD: ${{ secrets.CFY_PASSWORD }}
+      CFY_TENANT: ${{ secrets.CFY_TENANT }}
+      CFY_API_VERSION: ${{ vars.CFY_API_VERSION || 'v3.1' }}
+      CFY_INSECURE: ${{ vars.CFY_INSECURE || 'true' }}
+      GITOPS_MULTI_DEPLOYMENT_MODE: ${{ vars.GITOPS_MULTI_DEPLOYMENT_MODE || 'all' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate local Python
+        run: |
+          which python3
+          python3 --version
+          python3 -m pip --version
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt
+
+      - name: Validate required secrets
+        run: |
+          test -n "$CFY_MANAGER_URL" || (echo "CFY_MANAGER_URL is missing" && exit 1)
+          test -n "$CFY_USERNAME" || (echo "CFY_USERNAME is missing" && exit 1)
+          test -n "$CFY_PASSWORD" || (echo "CFY_PASSWORD is missing" && exit 1)
+          test -n "$CFY_TENANT" || (echo "CFY_TENANT is missing" && exit 1)
+
+      - name: Manual lifecycle from desired-state file
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          DRY_RUN_FLAG=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+          python3 scripts/manual_lifecycle_from_deployment.py \
+            --deployment-file "${{ github.event.inputs.deployment_file }}" \
+            --operation "${{ github.event.inputs.operation }}" \
+            $DRY_RUN_FLAG
+
+      - name: Commit-based desired-state reconcile
+        if: github.event_name == 'push'
+        run: |
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+          echo "Reconciling Cloudify desired state from $BEFORE to $AFTER"
+          python3 scripts/gitops_reconcile.py \
+            --before "$BEFORE" \
+            --after "$AFTER" \
+            --mode "$GITOPS_MULTI_DEPLOYMENT_MODE"
+
+      - name: Upload lifecycle logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudify-desired-state-logs
+          path: logs/
+          if-no-files-found: ignore
