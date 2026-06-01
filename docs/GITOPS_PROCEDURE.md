@@ -1,38 +1,117 @@
-# GitOps Procedure
+# Cloudify GitOps Lifecycle Procedure
 
-## Goal
+This repo uses request YAML files as the source of truth for Cloudify lifecycle actions.
 
-Cloudify lifecycle should be triggered from Git commits using the same script used by Jenkins:
+## Supported trigger modes
 
-```bash
-python3 scripts/cloudify_lifecycle.py --request <request-file>
-```
-
-## Folder used by GitOps
-
-GitHub Actions watches only:
-
-```text
-requests/gitops/**
-```
-
-It does not run request files from:
-
-```text
-requests/jenkins/**
-```
-
-This avoids duplicate lifecycle execution when the same repo is used for both demos and production flows.
-
-## Configure GitHub secrets
+### 1. Manual GitHub Actions run
 
 Go to:
 
 ```text
-GitHub repo -> Settings -> Secrets and variables -> Actions -> New repository secret
+Actions -> Cloudify Lifecycle GitOps -> Run workflow
 ```
 
-Add:
+Use one of:
+
+```text
+requests/hello-dev-install.yaml
+requests/hello-dev-update.yaml
+requests/hello-dev-uninstall.yaml
+```
+
+Optional manual overrides:
+
+```text
+deployment_id = app1-dev
+blueprint_id  = app1-bp
+dry_run       = true|false
+```
+
+### 2. Commit-based GitOps run
+
+For commit-based GitOps, the request YAML is the source of truth. The workflow runs the changed request file(s).
+
+Install:
+
+```bash
+vi requests/hello-dev-install.yaml
+git add requests/hello-dev-install.yaml
+git commit -m "Install hello dev through Cloudify GitOps"
+git push
+```
+
+Update:
+
+```bash
+vi requests/hello-dev-update.yaml
+git add requests/hello-dev-update.yaml
+git commit -m "Update hello dev through Cloudify GitOps"
+git push
+```
+
+Uninstall:
+
+```bash
+vi requests/hello-dev-uninstall.yaml
+git add requests/hello-dev-uninstall.yaml
+git commit -m "Uninstall hello dev through Cloudify GitOps"
+git push
+```
+
+## Per-deployment request files
+
+For production, create one set of request files per application/environment/deployment:
+
+```text
+requests/app1-dev-install.yaml
+requests/app1-dev-update.yaml
+requests/app1-dev-uninstall.yaml
+requests/app2-prod-install.yaml
+requests/app2-prod-update.yaml
+requests/app2-prod-uninstall.yaml
+```
+
+Each file should explicitly set:
+
+```yaml
+blueprint_id: app1-bp
+deployment_id: app1-dev
+operation: install
+workflow: install
+```
+
+For update/uninstall, use the same `deployment_id` used for install.
+
+## Multiple request files in one commit
+
+Controlled by repository variable:
+
+```text
+GITOPS_MULTI_REQUEST_MODE
+```
+
+Supported values:
+
+```text
+all   -> execute all changed request files in sorted order
+first -> execute only the first changed request file
+fail  -> fail if more than one request file changed
+```
+
+Default is `all`.
+
+## Safe no-op behavior
+
+If a commit changes blueprint/input/script files but no request YAML changes, the workflow does not execute Cloudify by default.
+
+To intentionally run a default request for non-request commits, create repository variable:
+
+```text
+DEFAULT_REQUEST_FILE=requests/hello-dev-update.yaml
+```
+
+## Required GitHub Secrets
 
 ```text
 CFY_MANAGER_URL
@@ -41,68 +120,49 @@ CFY_PASSWORD
 CFY_TENANT
 ```
 
-Optional repository variables:
+For local Minikube Cloudify, use a self-hosted runner and set:
+
+```text
+CFY_MANAGER_URL=http://192.168.49.2
+```
+
+## Optional GitHub Variables
 
 ```text
 CFY_API_VERSION=v3.1
 CFY_INSECURE=true
+LOG_LEVEL=INFO
+GITOPS_MULTI_REQUEST_MODE=all
+DEFAULT_REQUEST_FILE=
 ```
 
-## Manual GitOps run
+## Request safety controls
 
-Go to:
-
-```text
-GitHub repo -> Actions -> Cloudify Lifecycle GitOps -> Run workflow
-```
-
-Use:
-
-```text
-requests/gitops/hello-dev-install.yaml
-```
-
-## Commit-driven GitOps run
-
-Modify a GitOps request file:
-
-```bash
-vi requests/gitops/hello-dev-install.yaml
-git add requests/gitops/hello-dev-install.yaml
-git commit -m "Trigger Cloudify GitOps install"
-git push
-```
-
-GitHub Actions will:
-
-1. checkout the repo
-2. install Python dependencies
-3. validate Cloudify secrets
-4. select changed files from `requests/gitops/**`
-5. run `scripts/cloudify_lifecycle.py`
-6. upload logs as workflow artifacts
-
-## Add a new app
-
-```bash
-cp requests/gitops/hello-dev-install.yaml requests/gitops/my-app-dev-install.yaml
-vi requests/gitops/my-app-dev-install.yaml
-```
-
-Change at least:
+Disable a request without deleting it:
 
 ```yaml
-blueprint_id: my-app-bp
-deployment_id: my-app-dev
-blueprint_dir: blueprints/my-app
-inputs_files:
-  - inputs/my-app-dev.yaml
+enabled: false
 ```
 
-Commit and push:
+or:
 
-```bash
-git add requests/gitops/my-app-dev-install.yaml blueprints/my-app inputs/my-app-dev.yaml
-git commit -m "Add GitOps lifecycle for my app"
-git push
+```yaml
+disabled: true
 ```
+
+Validate only, no Cloudify API calls:
+
+```yaml
+dry_run: true
+```
+
+## Logs and audit
+
+Every run writes:
+
+```text
+logs/cloudify-lifecycle-<run_id>.log
+logs/cloudify-lifecycle-<run_id>.summary.json
+```
+
+The workflow uploads `logs/` as a GitHub Actions artifact.

@@ -1,0 +1,8 @@
+.env
+.env.jenkins
+logs/
+*.pyc
+__pycache__/
+.venv/
+.DS_Store
+jenkins_home/

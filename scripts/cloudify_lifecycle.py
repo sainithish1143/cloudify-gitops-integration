@@ -29,6 +29,7 @@ import sys
 import time
 import uuid
 import zipfile
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,7 +84,7 @@ def env_expand(value: Any) -> Any:
         def replace(match: re.Match[str]) -> str:
             name = match.group(1)
             default = match.group(3)
-            return os.getenv(name, default or "")
+            return (os.getenv(name, default or "") or "").strip()
 
         return pattern.sub(replace, value)
     if isinstance(value, list):
@@ -97,6 +98,42 @@ def bool_value(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def clean_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def int_value(value: Any, name: str, default: int, min_value: int = 0) -> int:
+    raw = clean_str(value, str(default))
+    try:
+        parsed = int(raw)
+    except ValueError as exc:
+        raise CloudifyLifecycleError(f"{name} must be an integer, got: {raw}") from exc
+    if parsed < min_value:
+        raise CloudifyLifecycleError(f"{name} must be >= {min_value}, got: {parsed}")
+    return parsed
+
+
+def normalize_manager_url(value: Any) -> str:
+    url = clean_str(value).rstrip("/")
+    if not url:
+        return url
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise CloudifyLifecycleError(f"manager_url must be a valid http(s) URL, got: {url!r}")
+    return url
+
+
+def validate_identifier(name: str, value: Any) -> str:
+    text = clean_str(value)
+    if not text:
+        raise CloudifyLifecycleError(f"{name} is required")
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", text):
+        raise CloudifyLifecycleError(f"{name} contains unsupported characters: {text!r}. Use letters, numbers, dot, underscore, dash or colon.")
+    return text
 
 
 def merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -332,7 +369,19 @@ class CloudifyClient:
             body["parameters"] = parameters
         logging.info("Starting workflow '%s' on deployment '%s'", workflow, deployment_id)
         status, text, payload = self.request("POST", "executions", json_body=body, content_type="application/json")
-        if status >= 400:
+        if status == 409 and bool_value(os.getenv("CFY_WAIT_ON_CONFLICT", "true")):
+            # Cloudify may reject concurrent workflows on the same deployment. Retry start with normal backoff.
+            wait_sec = self.cfg.retry_backoff_sec
+            for conflict_attempt in range(1, self.cfg.retry_count + 1):
+                logging.warning("Execution conflict for deployment=%s workflow=%s; retrying start in %ss (%s/%s)", deployment_id, workflow, wait_sec, conflict_attempt, self.cfg.retry_count)
+                time.sleep(wait_sec)
+                wait_sec = max(wait_sec + self.cfg.retry_backoff_sec, wait_sec)
+                status, text, payload = self.request("POST", "executions", json_body=body, content_type="application/json", retries=1)
+                if status < 400:
+                    break
+            if status >= 400:
+                raise CloudifyLifecycleError(f"Execution start failed after conflict retries HTTP {status}: {text}")
+        elif status >= 400:
             raise CloudifyLifecycleError(f"Execution start failed HTTP {status}: {text}")
         execution_id = payload.get("id")
         if not execution_id:
@@ -421,60 +470,79 @@ def load_inputs(files: Iterable[str], repo_root: Path) -> Dict[str, Any]:
 
 
 def build_config(values: Dict[str, Any]) -> Config:
-    manager_url = values.get("manager_url") or os.getenv("CFY_MANAGER_URL")
-    username = values.get("username") or os.getenv("CFY_USERNAME")
-    password = values.get("password") or os.getenv("CFY_PASSWORD")
-    tenant = values.get("tenant") or os.getenv("CFY_TENANT") or "default_tenant"
-    missing = [name for name, val in {"manager_url": manager_url, "username": username, "password": password}.items() if not val]
+    manager_url = clean_str(values.get("manager_url") or os.getenv("CFY_MANAGER_URL"))
+    username = clean_str(values.get("username") or os.getenv("CFY_USERNAME"))
+    password = clean_str(values.get("password") or os.getenv("CFY_PASSWORD"))
+    tenant = clean_str(values.get("tenant") or os.getenv("CFY_TENANT") or "default_tenant")
+    missing = [name for name, val in {"manager_url": manager_url, "username": username, "password": password, "tenant": tenant}.items() if not val]
     if missing:
         raise CloudifyLifecycleError(f"Missing required Cloudify config: {', '.join(missing)}")
     return Config(
-        manager_url=str(manager_url),
-        username=str(username),
-        password=str(password),
-        tenant=str(tenant),
-        api_version=str(values.get("api_version") or os.getenv("CFY_API_VERSION") or "v3.1"),
+        manager_url=normalize_manager_url(manager_url),
+        username=username,
+        password=password,
+        tenant=tenant,
+        api_version=clean_str(values.get("api_version") or os.getenv("CFY_API_VERSION") or "v3.1"),
         insecure=bool_value(values.get("insecure", os.getenv("CFY_INSECURE", "false"))),
-        request_timeout_sec=int(values.get("request_timeout_sec", os.getenv("CFY_REQUEST_TIMEOUT_SEC", "60"))),
-        execution_timeout_sec=int(values.get("execution_timeout_sec", os.getenv("CFY_EXEC_TIMEOUT_SEC", "3600"))),
-        poll_interval_sec=int(values.get("poll_interval_sec", os.getenv("CFY_POLL_INTERVAL_SEC", "10"))),
-        retry_count=int(values.get("retry_count", os.getenv("CFY_RETRY_COUNT", "5"))),
-        retry_backoff_sec=int(values.get("retry_backoff_sec", os.getenv("CFY_RETRY_BACKOFF_SEC", "2"))),
+        request_timeout_sec=int_value(values.get("request_timeout_sec", os.getenv("CFY_REQUEST_TIMEOUT_SEC", "60")), "request_timeout_sec", 60, 1),
+        execution_timeout_sec=int_value(values.get("execution_timeout_sec", os.getenv("CFY_EXEC_TIMEOUT_SEC", "3600")), "execution_timeout_sec", 3600, 1),
+        poll_interval_sec=int_value(values.get("poll_interval_sec", os.getenv("CFY_POLL_INTERVAL_SEC", "10")), "poll_interval_sec", 10, 1),
+        retry_count=int_value(values.get("retry_count", os.getenv("CFY_RETRY_COUNT", "5")), "retry_count", 5, 1),
+        retry_backoff_sec=int_value(values.get("retry_backoff_sec", os.getenv("CFY_RETRY_BACKOFF_SEC", "2")), "retry_backoff_sec", 2, 0),
     )
 
 
 def validate_request(values: Dict[str, Any], repo_root: Path) -> None:
-    operation = str(values.get("operation", "install")).lower()
+    operation = clean_str(values.get("operation", "install")).lower()
+    values["operation"] = operation
     if operation not in SUPPORTED_OPERATIONS:
         raise CloudifyLifecycleError(f"Unsupported operation '{operation}'. Supported: {', '.join(sorted(SUPPORTED_OPERATIONS))}")
-    if not values.get("deployment_id"):
-        raise CloudifyLifecycleError("deployment_id is required")
+
+    values["deployment_id"] = validate_identifier("deployment_id", values.get("deployment_id"))
+    if values.get("blueprint_id"):
+        values["blueprint_id"] = validate_identifier("blueprint_id", values.get("blueprint_id"))
+
     if operation in {"install", "update"}:
         for key in ("blueprint_id", "blueprint_dir"):
             if not values.get(key):
                 raise CloudifyLifecycleError(f"{key} is required for {operation}")
-        blueprint_dir = Path(resolve_path(repo_root, str(values["blueprint_dir"])))
+        blueprint_dir = Path(resolve_path(repo_root, clean_str(values["blueprint_dir"])))
         if not blueprint_dir.is_dir():
             raise CloudifyLifecycleError(f"blueprint_dir does not exist: {blueprint_dir}")
-        app_file = blueprint_dir / str(values.get("application_file", "blueprint.yaml"))
+        app_file = blueprint_dir / clean_str(values.get("application_file", "blueprint.yaml"))
         if not app_file.exists():
             raise CloudifyLifecycleError(f"application_file not found inside blueprint_dir: {app_file}")
-    if operation == "execute" and not values.get("workflow"):
+
+    if operation in {"execute"} and not values.get("workflow"):
         raise CloudifyLifecycleError("workflow is required for execute operation")
+
+    if operation in {"uninstall", "delete"} and bool_value(values.get("delete_blueprint", False)) and not values.get("blueprint_id"):
+        raise CloudifyLifecycleError("blueprint_id is required when delete_blueprint=true")
+
+    allowed_exists_values = {"upload", "skip", "fail"}
+    if clean_str(values.get("if_blueprint_exists", "upload")).lower() not in allowed_exists_values:
+        raise CloudifyLifecycleError("if_blueprint_exists must be one of: upload, skip, fail")
+    if clean_str(values.get("if_deployment_exists", "reuse")).lower() not in {"reuse", "skip", "fail", "recreate"}:
+        raise CloudifyLifecycleError("if_deployment_exists must be one of: reuse, skip, fail, recreate")
+
     for item in values.get("inputs_files") or []:
-        path = Path(resolve_path(repo_root, item))
+        path = Path(resolve_path(repo_root, clean_str(item)))
         if not path.exists():
             raise CloudifyLifecycleError(f"inputs_file not found: {path}")
 
 
 def run_lifecycle(values: Dict[str, Any], request_file: str, repo_root: Path, audit: Audit) -> None:
+    if bool_value(values.get("disabled", False)) or bool_value(values.get("enabled", True)) is False:
+        logging.info("Request is disabled; skipping Cloudify execution: %s", request_file)
+        audit.event("request_disabled_skipped", request_file=request_file)
+        return
     validate_request(values, repo_root)
     cfg = build_config(values)
     dry_run = bool_value(values.get("dry_run", False))
-    operation = str(values.get("operation", "install")).lower()
+    operation = clean_str(values.get("operation", "install")).lower()
     blueprint_id = values.get("blueprint_id")
-    deployment_id = str(values.get("deployment_id"))
-    workflow = values.get("workflow")
+    deployment_id = clean_str(values.get("deployment_id"))
+    workflow = clean_str(values.get("workflow")) if values.get("workflow") else None
     wait = bool_value(values.get("wait", True))
     parameters = values.get("parameters") or {}
 

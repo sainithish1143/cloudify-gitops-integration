@@ -1,38 +1,34 @@
-# Cloudify GitOps Lifecycle Automation
+# Cloudify GitOps Lifecycle Integration
 
-This repository demonstrates and provides a production-ready GitOps mechanism to invoke Cloudify blueprint lifecycle operations.
+Production-grade GitOps integration for invoking Cloudify blueprint lifecycle actions from GitHub Actions using a reusable Python runner.
 
-A Git commit or manual GitHub Actions run executes the same reusable lifecycle runner:
-
-```text
-Git commit -> GitHub Actions -> scripts/cloudify_lifecycle.py -> Cloudify Manager
-```
-
-## Layout
+## Flow
 
 ```text
-.github/workflows/cloudify-lifecycle.yml   # GitOps workflow
-scripts/cloudify_lifecycle.py              # Common production-grade Cloudify runner
-requests/                                  # Lifecycle intent YAML files
-blueprints/hello/                          # Example Cloudify blueprint
-inputs/dev.yaml                            # Example deployment inputs
-Dockerfile / docker-compose.yml            # Optional local runner
-logs/                                      # Runtime logs, ignored by Git
+Git commit or manual workflow
+  -> GitHub Actions workflow
+  -> scripts/cloudify_lifecycle.py
+  -> Cloudify Manager
+  -> blueprint upload / deployment create / workflow execute / uninstall / delete
 ```
 
-## Production controls included
+## Key properties
 
-The runner includes request validation, Cloudify credential validation, blueprint/input path validation, retry with backoff, execution polling, timeout handling, idempotency controls, dry-run support, secret masking, per-run log file, JSON summary, and non-zero exit codes for automation failures.
+- Same request YAML contract for install, update, execute, uninstall and delete
+- Commit-based request selection
+- Manual workflow override support
+- Self-hosted runner friendly for local/private Cloudify Manager
+- Idempotency controls for existing blueprints/deployments
+- Retry/backoff for transient API/network failures
+- Execution polling with timeout
+- Secret masking in logs/audit
+- Per-run log file and JSON audit summary
+- Safe no-op behavior when no request YAML changes
+- Supports multiple request files in one commit with configurable policy
 
-## Configure GitHub Actions secrets
+## Required setup
 
-Go to:
-
-```text
-GitHub repo -> Settings -> Secrets and variables -> Actions -> New repository secret
-```
-
-Add:
+GitHub repository secrets:
 
 ```text
 CFY_MANAGER_URL
@@ -41,49 +37,57 @@ CFY_PASSWORD
 CFY_TENANT
 ```
 
-Optional GitHub variables:
+Optional repository variables:
 
 ```text
 CFY_API_VERSION=v3.1
 CFY_INSECURE=true
+LOG_LEVEL=INFO
+GITOPS_MULTI_REQUEST_MODE=all
+DEFAULT_REQUEST_FILE=
 ```
 
-## Trigger GitOps manually
+For Minikube/local Cloudify IP such as `http://192.168.49.2`, use a GitHub self-hosted runner on the same machine/network.
 
-Go to:
+## Run manually
 
 ```text
-GitHub repo -> Actions -> Cloudify Lifecycle GitOps -> Run workflow
+Actions -> Cloudify Lifecycle GitOps -> Run workflow
 ```
 
-Use:
+Request files:
 
 ```text
 requests/hello-dev-install.yaml
+requests/hello-dev-update.yaml
+requests/hello-dev-uninstall.yaml
 ```
 
-## Trigger GitOps by commit
-
-Change or add a request file:
+## Run by commit
 
 ```bash
-cp requests/hello-dev-install.yaml requests/my-app-dev-install.yaml
-vi requests/my-app-dev-install.yaml
-git add requests/my-app-dev-install.yaml
-git commit -m "Trigger Cloudify install from GitOps"
+git add requests/hello-dev-install.yaml
+git commit -m "Install hello dev through Cloudify GitOps"
 git push
 ```
 
-GitHub Actions will run:
+The workflow selects the changed request YAML and executes it.
 
-```bash
-python3 scripts/cloudify_lifecycle.py --request requests/my-app-dev-install.yaml
-```
-
-## Local test before pushing
+## Local validation
 
 ```bash
 cp .env.example .env
 vi .env
 ./run-compose.sh requests/hello-dev-install.yaml
+```
+
+## Docs
+
+See:
+
+```text
+docs/GITOPS_PROCEDURE.md
+docs/PRODUCTION_GRADE_DESIGN.md
+docs/DOCKER_COMPOSE_RUN.md
+docs/ARCHITECTURE.md
 ```
