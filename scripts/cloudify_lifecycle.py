@@ -190,10 +190,27 @@ class CloudifyClient:
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         url = f"{self.base_url}{path}"
         timeout = kwargs.pop("timeout", self.req.request_timeout_sec)
+
+        # Production-safe default: every Cloudify API call must carry tenant and
+        # authentication. The token call is retained as a credential validation
+        # step, but subsequent calls also use Basic Auth because some Cloudify
+        # deployments do not accept Bearer token format for all endpoints.
+        headers = kwargs.pop("headers", {}) or {}
+        headers.setdefault("Tenant", self.req.tenant)
+        if "json" in kwargs:
+            headers.setdefault("Content-Type", "application/json")
+        kwargs.setdefault("auth", (self.req.username, self.req.password))
+
         last_error: Optional[Exception] = None
         for attempt in range(1, self.req.retry_count + 1):
             try:
-                response = self.session.request(method, url, timeout=timeout, **kwargs)
+                response = self.session.request(
+                    method,
+                    url,
+                    headers=headers,
+                    timeout=timeout,
+                    **kwargs,
+                )
                 if response.status_code in {429, 500, 502, 503, 504} and attempt < self.req.retry_count:
                     self.logger.warning("Cloudify API returned %s for %s %s. Retrying attempt %s/%s", response.status_code, method, path, attempt, self.req.retry_count)
                     time.sleep(self.req.retry_backoff_sec * attempt)
@@ -224,7 +241,9 @@ class CloudifyClient:
         token = response.json().get("value") or response.json().get("token")
         if not token:
             raise RuntimeError("Cloudify token response did not contain a token value")
-        self.session.headers.update({"Authorization": f"Bearer {token}"})
+        # Do not set a Bearer token header here. Some Cloudify v3.1 deployments
+        # require Basic Auth on follow-up endpoints such as blueprint upload.
+        # _request() applies Basic Auth consistently to every API call.
         self.logger.info("Authenticated to Cloudify Manager")
 
     def blueprint_exists(self, blueprint_id: str) -> bool:
