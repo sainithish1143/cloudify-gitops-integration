@@ -19,7 +19,7 @@ on:
 jobs:
   cloudify-lifecycle:
     name: Execute Cloudify lifecycle
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     env:
       CFY_MANAGER_URL: ${{ secrets.CFY_MANAGER_URL }}
