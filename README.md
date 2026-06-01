@@ -24,17 +24,6 @@ logs/                                      # Runtime logs, ignored by Git
 
 The runner includes request validation, Cloudify credential validation, blueprint/input path validation, retry with backoff, execution polling, timeout handling, idempotency controls, dry-run support, secret masking, per-run log file, JSON summary, and non-zero exit codes for automation failures.
 
-## Commit this repo
-
-```bash
-git init
-git add .
-git commit -m "Add Cloudify GitOps lifecycle automation"
-git branch -M main
-git remote add origin https://github.com/<your-user-or-org>/cloudify-gitops-lifecycle.git
-git push -u origin main
-```
-
 ## Configure GitHub Actions secrets
 
 Go to:
