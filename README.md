@@ -188,3 +188,21 @@ Default is `true`. If the referenced Cloudify deployment does not exist yet, the
 - Deleting `deployments/*.yaml` performs uninstall/delete based on policy.
 
 The runner also creates Cloudify-compatible blueprint archives with exactly one top-level directory, as required by Cloudify Manager.
+
+## Multiple deployments / same blueprint
+
+Yes, the same blueprint can be used to create many deployments with different inputs. Keep one file per deployment under `deployments/`, and point each deployment to its own input file. See `docs/MULTI_DEPLOYMENT_MODEL.md` and `examples/multi-deployment/`.
+
+Example:
+
+```text
+blueprints/hello/blueprint.yaml
+inputs/hello/app1-dev.yaml
+inputs/hello/app2-dev.yaml
+deployments/app1-dev.yaml
+deployments/app2-dev.yaml
+operations/app1-dev-install.yaml
+operations/app2-dev-install.yaml
+```
+
+`deployments/*.yaml` creates/registers Cloudify environments. `operations/*.yaml` executes user-provided Cloudify workflow names. The same mechanism is suitable for Jenkins later because Jenkins can call the same scripts.
