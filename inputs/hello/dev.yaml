@@ -1,4 +1,4 @@
-customer_name: "Demo Customer"
+customer_name: "Customer"
 application_name: "hello-gitops-service"
 environment: "dev"
 message: "This value came from GitOps input file and is visible in Cloudify execution logs"
