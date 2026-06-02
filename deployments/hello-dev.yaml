@@ -45,7 +45,6 @@ spec:
     poll_interval_sec: 10
     retry_count: 5
     retry_backoff_sec: 5
-
   logging:
     level: INFO
     log_dir: logs
