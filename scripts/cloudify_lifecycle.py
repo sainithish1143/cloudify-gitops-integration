@@ -106,6 +106,7 @@ class LifecycleRequest:
     delete_deployment: bool
     delete_blueprint: bool
     dry_run: bool
+    ensure_environment: bool
     log_level: str
     log_dir: Path
 
@@ -158,6 +159,7 @@ class LifecycleRequest:
             delete_deployment=_bool(data.get("delete_deployment"), operation in {"uninstall", "delete"}),
             delete_blueprint=_bool(data.get("delete_blueprint"), False),
             dry_run=_bool(data.get("dry_run"), False),
+            ensure_environment=_bool(data.get("ensure_environment"), False),
             log_level=_strip(data.get("log_level") or "INFO"),
             log_dir=log_dir,
         )
@@ -266,12 +268,27 @@ class CloudifyClient:
         return True
 
     def create_blueprint_zip(self) -> Path:
+        """Create a Cloudify-compatible blueprint archive.
+
+        Cloudify Manager expects uploaded archives to contain exactly one top-level
+        directory. The blueprint files must be placed under that directory, not
+        directly at the zip root.
+        """
         temp_dir = Path(tempfile.mkdtemp(prefix="cfy-bp-"))
         zip_path = temp_dir / f"{self.req.blueprint_id}.zip"
+        top_dir = self.req.blueprint_dir.name
+        entries = []
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
             for file_path in self.req.blueprint_dir.rglob("*"):
                 if file_path.is_file():
-                    archive.write(file_path, file_path.relative_to(self.req.blueprint_dir))
+                    arcname = Path(top_dir) / file_path.relative_to(self.req.blueprint_dir)
+                    archive.write(file_path, arcname.as_posix())
+                    entries.append(arcname.as_posix())
+        if not entries:
+            raise RuntimeError(f"Blueprint directory is empty: {self.req.blueprint_dir}")
+        top_level = {entry.split('/')[0] for entry in entries}
+        if len(top_level) != 1:
+            raise RuntimeError(f"Invalid blueprint archive structure: expected one top-level directory, got {sorted(top_level)}")
         return zip_path
 
     def upload_blueprint(self) -> None:
@@ -383,7 +400,12 @@ def execute(req: LifecycleRequest, logger: logging.Logger) -> Dict[str, Any]:
 
     elif req.operation in {"execute", "execute_workflow"}:
         if not client.deployment_exists(req.deployment_id):
-            raise RuntimeError(f"Deployment not found: {req.deployment_id}. Commit the deployment desired-state file first to create the environment.")
+            if req.ensure_environment:
+                logger.info("Deployment '%s' not found; ensure_environment=true, creating Cloudify environment before workflow execution", req.deployment_id)
+                client.upload_blueprint()
+                client.create_deployment()
+            else:
+                raise RuntimeError(f"Deployment not found: {req.deployment_id}. Commit the deployment desired-state file first to create the environment, or set ensure_environment: true on the operation intent.")
         execution_id = client.start_execution(req.workflow)
         summary["execution_id"] = execution_id
         if req.wait:

@@ -202,6 +202,7 @@ def operation_to_request(op_spec: Dict[str, Any], repo: Path) -> Dict[str, Any]:
         "workflow_parameters": parameters,
         "wait": spec.get("wait", True),
         "execution_timeout_sec": spec.get("timeout_sec", 3600),
+        "ensure_environment": spec.get("ensure_environment", True),
     }
     return deployment_to_request(dep_spec, "execute_workflow", repo, extra)
 
@@ -275,6 +276,11 @@ def reconcile(repo: Path, before: str, after: str, mode: str, dry_run: bool, log
         actions = actions[:1]
     elif mode == "fail" and len(actions) > 1:
         raise RuntimeError(f"Multiple actions detected but mode=fail: {[(a,b) for a,b,_ in actions]}")
+
+    # Always create/register environments before executing workflows in the same commit.
+    # This supports commits that add a deployment file and an operation intent together.
+    priority = {"create_environment": 0, "execute_workflow": 1, "uninstall": 2, "delete_environment": 3}
+    actions = sorted(actions, key=lambda item: priority.get(item[1], 99))
 
     logger.info("Cloudify actions: %s", [(p, op) for p, op, _ in actions])
     temp_dir = Path(tempfile.mkdtemp(prefix="cfy-envops-requests-"))
