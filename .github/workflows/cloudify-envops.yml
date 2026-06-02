@@ -1,32 +1,26 @@
-name: Cloudify Environment + Workflow GitOps
+name: Cloudify EnvOps GitOps
 
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "Manual action mode"
-        required: true
-        default: "create-environment"
-        type: choice
-        options:
-          - create-environment
-          - execute-workflow
-          - uninstall
-          - delete-environment
       deployment_file:
-        description: "Deployment desired-state file"
-        required: true
+        description: "Deployment desired-state YAML"
+        required: false
         default: "deployments/hello-dev.yaml"
+      action:
+        description: "Manual action: create-environment, execute-workflow, delete-environment"
+        required: false
+        default: "create-environment"
       workflow:
-        description: "Cloudify workflow name for execute-workflow/uninstall"
+        description: "Workflow for execute-workflow action, e.g. install, execute_operation, heal, scale"
         required: false
         default: "install"
       parameters_file:
-        description: "Optional YAML workflow parameters file"
+        description: "Optional workflow parameters YAML"
         required: false
         default: ""
       inject_inputs_as_operation_kwargs:
-        description: "For execute_operation, pass latest input values as operation_kwargs"
+        description: "true/false; inject deployment input YAML as operation_kwargs"
         required: false
         default: "false"
   push:
@@ -35,8 +29,13 @@ on:
       - "operations/**"
       - "blueprints/**"
       - "inputs/**"
+      - "workflow-params/**"
       - "scripts/**"
       - ".github/workflows/cloudify-envops.yml"
+
+concurrency:
+  group: cloudify-envops-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   reconcile:
@@ -51,6 +50,7 @@ jobs:
       CFY_API_VERSION: ${{ vars.CFY_API_VERSION || 'v3.1' }}
       CFY_INSECURE: ${{ vars.CFY_INSECURE || 'true' }}
       GITOPS_MULTI_DEPLOYMENT_MODE: ${{ vars.GITOPS_MULTI_DEPLOYMENT_MODE || 'all' }}
+      GITOPS_LOG_LEVEL: ${{ vars.GITOPS_LOG_LEVEL || 'INFO' }}
 
     steps:
       - name: Checkout repository
@@ -79,29 +79,30 @@ jobs:
       - name: Manual Cloudify action
         if: github.event_name == 'workflow_dispatch'
         run: |
+          set -e
           EXTRA=""
           if [ "${{ github.event.inputs.inject_inputs_as_operation_kwargs }}" = "true" ]; then
             EXTRA="$EXTRA --inject-inputs-as-operation-kwargs"
           fi
           if [ -n "${{ github.event.inputs.parameters_file }}" ]; then
-            EXTRA="$EXTRA --parameters-file '${{ github.event.inputs.parameters_file }}'"
+            EXTRA="$EXTRA --parameters-file ${{ github.event.inputs.parameters_file }}"
           fi
           python3 scripts/manual_lifecycle_from_deployment.py \
             --deployment "${{ github.event.inputs.deployment_file }}" \
-            --action "${{ github.event.inputs.mode }}" \
+            --action "${{ github.event.inputs.action }}" \
             --workflow "${{ github.event.inputs.workflow }}" \
             $EXTRA
 
       - name: Commit-based Cloudify reconcile
         if: github.event_name == 'push'
         run: |
+          set -e
           BEFORE="${{ github.event.before }}"
-          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            BEFORE="$(git rev-list --max-parents=0 HEAD)"
-          fi
+          AFTER="${{ github.sha }}"
+          echo "Reconciling Cloudify envops from $BEFORE to $AFTER"
           python3 scripts/gitops_reconcile.py \
             --before "$BEFORE" \
-            --after "${{ github.sha }}" \
+            --after "$AFTER" \
             --mode "$GITOPS_MULTI_DEPLOYMENT_MODE"
 
       - name: Upload lifecycle logs
