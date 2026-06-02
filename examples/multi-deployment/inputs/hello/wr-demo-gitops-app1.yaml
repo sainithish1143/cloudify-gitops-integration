@@ -1,0 +1,5 @@
+customer_name: "Demo Customer App1"
+application_name: "wr-demo-gitops-app1-service"
+environment: "dev"
+message: "wr-demo-gitops-app1 uses the shared hello blueprint with its own input file"
+replicas: 2

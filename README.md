@@ -21,10 +21,10 @@ Cloudify blueprints may expose different workflows such as `install`, `execute_o
 ```text
 blueprints/hello/blueprint.yaml          # demo Cloudify blueprint
 blueprints/hello/scripts/lifecycle.py    # prints Git/Jenkins provided input values
-deployments/hello-dev.yaml               # Cloudify environment desired state
+deployments/wr-demo-gitops-hello.yaml               # Cloudify environment desired state
 inputs/hello/dev.yaml                    # input values for the deployment
-operations/hello-dev-install.yaml        # executes install workflow
-operations/hello-dev-configure.yaml      # executes execute_operation workflow
+operations/wr-demo-gitops-hello-install.yaml        # executes install workflow
+operations/wr-demo-gitops-hello-configure.yaml      # executes execute_operation workflow
 scripts/cloudify_lifecycle.py            # common Cloudify REST lifecycle runner
 scripts/gitops_reconcile.py              # common Git diff reconciler
 scripts/manual_lifecycle_from_deployment.py
@@ -35,9 +35,9 @@ scripts/manual_lifecycle_from_deployment.py
 ### 1. Create environment
 
 ```bash
-echo "# reconcile env $(date)" >> deployments/hello-dev.yaml
-git add deployments/hello-dev.yaml
-git commit -m "Create hello dev Cloudify environment"
+echo "# reconcile env $(date)" >> deployments/wr-demo-gitops-hello.yaml
+git add deployments/wr-demo-gitops-hello.yaml
+git commit -m "Create wr-demo-gitops-hello Cloudify environment"
 git push
 ```
 
@@ -46,9 +46,9 @@ This uploads/reuses the blueprint and creates/reuses the deployment. It does not
 ### 2. Execute install workflow
 
 ```bash
-echo "# install $(date)" >> operations/hello-dev-install.yaml
-git add operations/hello-dev-install.yaml
-git commit -m "Run install workflow for hello dev"
+echo "# install $(date)" >> operations/wr-demo-gitops-hello-install.yaml
+git add operations/wr-demo-gitops-hello-install.yaml
+git commit -m "Run install workflow for wr-demo-gitops-hello"
 git push
 ```
 
@@ -56,8 +56,8 @@ git push
 
 ```bash
 vi inputs/hello/dev.yaml
-echo "# configure $(date)" >> operations/hello-dev-configure.yaml
-git add inputs/hello/dev.yaml operations/hello-dev-configure.yaml
+echo "# configure $(date)" >> operations/wr-demo-gitops-hello-configure.yaml
+git add inputs/hello/dev.yaml operations/wr-demo-gitops-hello-configure.yaml
 git commit -m "Run configure workflow with updated inputs"
 git push
 ```
@@ -67,8 +67,8 @@ The Cloudify execution logs should show `customer_name`, `application_name`, `en
 ### 4. Delete environment
 
 ```bash
-git rm deployments/hello-dev.yaml
-git commit -m "Remove hello dev Cloudify environment"
+git rm deployments/wr-demo-gitops-hello.yaml
+git commit -m "Remove wr-demo-gitops-hello Cloudify environment"
 git push
 ```
 
@@ -120,3 +120,28 @@ Workflow file:
 ```text
 .github/workflows/cloudify-envops.yml
 ```
+
+## Naming convention
+
+This repo intentionally uses source-specific Cloudify IDs so the demo is clear in the Cloudify UI.
+
+| Source | Blueprint ID | Deployment ID |
+|---|---|---|
+| GITOPS | `wr-demo-gitops-hello-bp` | `wr-demo-gitops-hello` |
+
+Recommended production naming pattern:
+
+```text
+<org-or-product>-<automation-source>-<application>-<environment>
+```
+
+Examples:
+
+```text
+wr-demo-gitops-hello
+wr-demo-jenkins-hello-dev
+customer1-gitops-edgeapp-site001
+customer1-jenkins-edgeapp-site001
+```
+
+The same scripts and YAML model are used by GitOps and Jenkins. Only the automation source prefix differs for demo clarity.

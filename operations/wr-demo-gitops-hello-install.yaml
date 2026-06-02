@@ -1,18 +1,11 @@
 apiVersion: cloudify.windriver.com/v1
 kind: CloudifyOperation
-
 metadata:
-  name: hello-dev-install
-
+  name: wr-demo-gitops-hello-install
 spec:
-  deployment_ref: deployments/hello-dev.yaml
+  deployment_ref: deployments/wr-demo-gitops-hello.yaml
   workflow: install
   wait: true
   ensure_environment: true
   timeout_sec: 3600
   parameters: {}
-  
-  
-  
-  
-  

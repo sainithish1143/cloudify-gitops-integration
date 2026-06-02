@@ -1,0 +1,15 @@
+deployments/wr-demo-gitops-hello.yaml
+examples/multi-deployment/deployments/wr-demo-gitops-app1.yaml
+examples/multi-deployment/deployments/wr-demo-gitops-app2.yaml
+examples/multi-deployment/inputs/hello/wr-demo-gitops-app1.yaml
+examples/multi-deployment/inputs/hello/wr-demo-gitops-app2.yaml
+examples/multi-deployment/operations/wr-demo-gitops-app1-configure.yaml
+examples/multi-deployment/operations/wr-demo-gitops-app1-install.yaml
+examples/multi-deployment/operations/wr-demo-gitops-app1-uninstall.yaml.sample
+examples/multi-deployment/operations/wr-demo-gitops-app2-configure.yaml
+examples/multi-deployment/operations/wr-demo-gitops-app2-install.yaml
+examples/multi-deployment/operations/wr-demo-gitops-app2-uninstall.yaml.sample
+operations/README.md
+operations/wr-demo-gitops-hello-configure.yaml
+operations/wr-demo-gitops-hello-install.yaml
+operations/wr-demo-gitops-hello-uninstall.yaml.sample

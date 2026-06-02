@@ -6,7 +6,7 @@ on:
       deployment_file:
         description: "Deployment desired-state YAML"
         required: false
-        default: "deployments/hello-dev.yaml"
+        default: "deployments/wr-demo-gitops-hello.yaml"
       action:
         description: "Manual action: create-environment, execute-workflow, delete-environment"
         required: false
