@@ -128,6 +128,7 @@ def deployment_to_request(spec: Dict[str, Any], operation: str, repo: Path, extr
     deployment = body.get("deployment") or {}
     execution = body.get("execution") or {}
     logging_cfg = body.get("logging") or {}
+    policies = body.get("policies") or {}
 
     deployment_id = _strip(deployment.get("id") or metadata.get("name"))
     blueprint_id = _strip(blueprint.get("id") or f"{deployment_id}-bp")
@@ -157,6 +158,8 @@ def deployment_to_request(spec: Dict[str, Any], operation: str, repo: Path, extr
         "delete_deployment": False,
         "delete_blueprint": False,
         "dry_run": body.get("dry_run", False),
+        "force_recreate_environment": bool(policies.get("force_recreate_environment", False)),
+        "recreate_uninstall_first": bool(policies.get("recreate_uninstall_first", False)),
         "log_level": logging_cfg.get("level", "INFO"),
         "log_dir": logging_cfg.get("log_dir", "logs"),
     }

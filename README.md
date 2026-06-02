@@ -215,3 +215,12 @@ The demo blueprint maps deployment inputs to node properties and the lifecycle s
 ## Note on input logging fix
 
 The demo lifecycle script now reads values from node properties mapped from deployment inputs and from execute_operation kwargs. It does not write runtime properties during lifecycle operations, which avoids Cloudify script-runner read-only property conflicts across versions.
+
+
+## Important: stale Cloudify deployment protection
+
+This demo package sets `spec.policies.force_recreate_environment: true` in `deployments/hello-dev.yaml`.
+When the deployment file is committed, the reconciler uploads the latest blueprint and recreates the Cloudify deployment if it already exists.
+This prevents old deployment plans from continuing to run an older blueprint script.
+
+For production, set it to `false` and use an explicit Cloudify deployment-update or controlled migration workflow.

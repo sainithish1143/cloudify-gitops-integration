@@ -33,13 +33,18 @@ spec:
     uninstall_workflow: uninstall
     delete_blueprint_on_delete: false
 
+    # Demo safety: recreate environment when this deployment file is committed.
+    # This prevents stale Cloudify deployment plans from older blueprint versions.
+    # For production, set this to false and use a controlled deployment-update strategy.
+    force_recreate_environment: true
+    recreate_uninstall_first: false
+
   execution:
     request_timeout_sec: 60
     execution_timeout_sec: 3600
     poll_interval_sec: 10
     retry_count: 5
     retry_backoff_sec: 5
-    
 
   logging:
     level: INFO

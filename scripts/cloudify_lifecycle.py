@@ -107,6 +107,8 @@ class LifecycleRequest:
     delete_blueprint: bool
     dry_run: bool
     ensure_environment: bool
+    force_recreate_environment: bool
+    recreate_uninstall_first: bool
     log_level: str
     log_dir: Path
 
@@ -160,6 +162,8 @@ class LifecycleRequest:
             delete_blueprint=_bool(data.get("delete_blueprint"), False),
             dry_run=_bool(data.get("dry_run"), False),
             ensure_environment=_bool(data.get("ensure_environment"), False),
+            force_recreate_environment=_bool(data.get("force_recreate_environment"), False),
+            recreate_uninstall_first=_bool(data.get("recreate_uninstall_first"), False),
             log_level=_strip(data.get("log_level") or "INFO"),
             log_dir=log_dir,
         )
@@ -380,7 +384,20 @@ def execute(req: LifecycleRequest, logger: logging.Logger) -> Dict[str, Any]:
 
     if req.operation == "create_environment":
         client.upload_blueprint()
-        if not client.deployment_exists(req.deployment_id):
+        exists = client.deployment_exists(req.deployment_id)
+        if exists and req.force_recreate_environment:
+            logger.info("Cloudify deployment '%s' already exists and force_recreate_environment=true", req.deployment_id)
+            if req.recreate_uninstall_first:
+                try:
+                    logger.info("Running uninstall workflow before recreate for deployment '%s'", req.deployment_id)
+                    execution_id = client.start_execution("uninstall")
+                    if req.wait:
+                        client.wait_for_execution(execution_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Uninstall before recreate failed or was not required: %s", exc)
+            client.delete_deployment()
+            exists = False
+        if not exists:
             client.create_deployment()
             logger.info("Cloudify environment/deployment '%s' created", req.deployment_id)
         else:
