@@ -2,7 +2,18 @@ from cloudify import ctx
 
 
 def _as_dict(value):
-    return value if isinstance(value, dict) else {}
+    """Return a normal mutable dict.
+
+    Cloudify context objects can expose read-only dict-like mappings. Calling
+    update() on those objects may raise "Cannot override read only properties".
+    Always copy into a plain Python dict before merging/reading.
+    """
+    if value is None:
+        return {}
+    try:
+        return dict(value)
+    except Exception:
+        return {}
 
 
 def _node_properties():
