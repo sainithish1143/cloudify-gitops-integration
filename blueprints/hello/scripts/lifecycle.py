@@ -5,20 +5,29 @@ def _as_dict(value):
     return value if isinstance(value, dict) else {}
 
 
+def _node_properties():
+    """Deployment inputs are mapped to node properties in blueprint.yaml.
+
+    This works for normal lifecycle workflows such as install/uninstall where
+    Cloudify may not expose operation inputs as ctx.operation.inputs in every
+    Cloudify version.
+    """
+    node = getattr(ctx, "node", None)
+    return _as_dict(getattr(node, "properties", None)) if node is not None else {}
+
+
 def _operation_values():
     """Return operation inputs/kwargs in a Cloudify-version tolerant way.
 
-    Some Cloudify versions expose operation parameters via ctx.operation.inputs,
-    while others expose them via ctx.operation.kwargs. This demo supports both
-    and prefers kwargs because execute_operation passes operation_kwargs there.
+    execute_operation passes operation_kwargs in ctx.operation.kwargs. Some
+    Cloudify versions expose blueprint operation inputs as ctx.operation.inputs;
+    others do not. This function safely supports both.
     """
     values = {}
-
     operation = getattr(ctx, "operation", None)
     if operation is not None:
         values.update(_as_dict(getattr(operation, "inputs", None)))
         values.update(_as_dict(getattr(operation, "kwargs", None)))
-
     return values
 
 
@@ -27,9 +36,14 @@ def _get(values, key, default="N/A"):
     return default if value is None else value
 
 
-values = _operation_values()
+# Base values come from deployment inputs mapped to node properties.
+# Operation kwargs can override them for ad-hoc workflow execution.
+values = _node_properties()
+values.update(_operation_values())
 
-action = _get(values, "action", "workflow-operation")
+operation = getattr(ctx, "operation", None)
+operation_name = getattr(operation, "name", "workflow-operation") if operation is not None else "workflow-operation"
+action = _get(values, "action", operation_name)
 customer_name = _get(values, "customer_name")
 application_name = _get(values, "application_name")
 environment = _get(values, "environment")

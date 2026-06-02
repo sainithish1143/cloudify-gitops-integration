@@ -1,8 +1,8 @@
 tosca_definitions_version: cloudify_dsl_1_5
 
 description: >
-  Demo Cloudify blueprint for GitOps desired-state lifecycle.
-  It accepts user-provided inputs and prints them during workflow execution.
+  Demo Cloudify blueprint for GitOps/Jenkins lifecycle automation.
+  It accepts user-provided deployment inputs and prints them during workflow execution.
 
 imports:
   - cloudify/types/types.yaml
@@ -33,9 +33,35 @@ inputs:
     description: Desired replica count for demo logging.
     default: 1
 
+node_types:
+  cloudify.nodes.GitOpsDemo:
+    derived_from: cloudify.nodes.Root
+    properties:
+      customer_name:
+        type: string
+        default: Wind River Customer
+      application_name:
+        type: string
+        default: hello-service
+      environment:
+        type: string
+        default: dev
+      message:
+        type: string
+        default: Hello from Cloudify GitOps desired-state demo
+      replicas:
+        type: integer
+        default: 1
+
 node_templates:
   hello_gitops_node:
-    type: cloudify.nodes.Root
+    type: cloudify.nodes.GitOpsDemo
+    properties:
+      customer_name: { get_input: customer_name }
+      application_name: { get_input: application_name }
+      environment: { get_input: environment }
+      message: { get_input: message }
+      replicas: { get_input: replicas }
     interfaces:
       cloudify.interfaces.lifecycle:
         create:
@@ -43,48 +69,23 @@ node_templates:
           executor: central_deployment_agent
           inputs:
             action: create
-            customer_name: { get_input: customer_name }
-            application_name: { get_input: application_name }
-            environment: { get_input: environment }
-            message: { get_input: message }
-            replicas: { get_input: replicas }
         configure:
           implementation: scripts/lifecycle.py
           executor: central_deployment_agent
           inputs:
             action: configure
-            customer_name: { get_input: customer_name }
-            application_name: { get_input: application_name }
-            environment: { get_input: environment }
-            message: { get_input: message }
-            replicas: { get_input: replicas }
         start:
           implementation: scripts/lifecycle.py
           executor: central_deployment_agent
           inputs:
             action: start
-            customer_name: { get_input: customer_name }
-            application_name: { get_input: application_name }
-            environment: { get_input: environment }
-            message: { get_input: message }
-            replicas: { get_input: replicas }
         stop:
           implementation: scripts/lifecycle.py
           executor: central_deployment_agent
           inputs:
             action: stop
-            customer_name: { get_input: customer_name }
-            application_name: { get_input: application_name }
-            environment: { get_input: environment }
-            message: { get_input: message }
-            replicas: { get_input: replicas }
         delete:
           implementation: scripts/lifecycle.py
           executor: central_deployment_agent
           inputs:
             action: delete
-            customer_name: { get_input: customer_name }
-            application_name: { get_input: application_name }
-            environment: { get_input: environment }
-            message: { get_input: message }
-            replicas: { get_input: replicas }

@@ -206,3 +206,8 @@ operations/app2-dev-install.yaml
 ```
 
 `deployments/*.yaml` creates/registers Cloudify environments. `operations/*.yaml` executes user-provided Cloudify workflow names. The same mechanism is suitable for Jenkins later because Jenkins can call the same scripts.
+
+
+## Input values in Cloudify logs
+
+The demo blueprint maps deployment inputs to node properties and the lifecycle script reads those properties. This means input values appear during normal lifecycle workflows such as `install`, not only during `execute_operation`. Operation kwargs can still override these values for ad-hoc workflow execution.
