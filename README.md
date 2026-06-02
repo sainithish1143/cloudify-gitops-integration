@@ -211,3 +211,7 @@ operations/app2-dev-install.yaml
 ## Input values in Cloudify logs
 
 The demo blueprint maps deployment inputs to node properties and the lifecycle script reads those properties. This means input values appear during normal lifecycle workflows such as `install`, not only during `execute_operation`. Operation kwargs can still override these values for ad-hoc workflow execution.
+
+## Note on input logging fix
+
+The demo lifecycle script now reads values from node properties mapped from deployment inputs and from execute_operation kwargs. It does not write runtime properties during lifecycle operations, which avoids Cloudify script-runner read-only property conflicts across versions.

@@ -67,25 +67,15 @@ node_templates:
         create:
           implementation: scripts/lifecycle.py
           executor: central_deployment_agent
-          inputs:
-            action: create
         configure:
           implementation: scripts/lifecycle.py
           executor: central_deployment_agent
-          inputs:
-            action: configure
         start:
           implementation: scripts/lifecycle.py
           executor: central_deployment_agent
-          inputs:
-            action: start
         stop:
           implementation: scripts/lifecycle.py
           executor: central_deployment_agent
-          inputs:
-            action: stop
         delete:
           implementation: scripts/lifecycle.py
           executor: central_deployment_agent
-          inputs:
-            action: delete
