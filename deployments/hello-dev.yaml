@@ -48,3 +48,4 @@ spec:
   logging:
     level: INFO
     log_dir: logs
+    
