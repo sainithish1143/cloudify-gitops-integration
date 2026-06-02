@@ -5,7 +5,6 @@ metadata:
   name: hello-dev
   environment: dev
   owner: platform-team
-  description: Demo deployment managed through GitOps desired-state reconciliation test.
 
 spec:
   enabled: true
@@ -22,32 +21,25 @@ spec:
     id: hello-gitops-dev
     inputs:
       - inputs/hello/dev.yaml
+    inline_inputs: {}
 
-  lifecycle:
-    install:
-      workflow: install
-      wait: true
-      timeout_sec: 3600
+  policies:
+    # Deployment commit creates/registers the Cloudify environment only.
+    create_only_on_deployment_commit: true
 
-    update:
-      workflow: update
-      wait: true
-      timeout_sec: 3600
-
-    uninstall:
-      workflow: uninstall
-      wait: true
-      timeout_sec: 3600
-      delete_deployment: true
-      delete_blueprint: false
+    # For production, use 'manual' and require an explicit uninstall operation.
+    # For demos, auto_uninstall_delete lets a git rm deployments/*.yaml trigger uninstall + delete.
+    deletion_policy: auto_uninstall_delete
+    uninstall_workflow: uninstall
+    delete_blueprint_on_delete: false
 
   execution:
+    request_timeout_sec: 60
+    execution_timeout_sec: 3600
+    poll_interval_sec: 10
     retry_count: 5
     retry_backoff_sec: 5
-    request_timeout_sec: 60
-    poll_interval_sec: 10
 
   logging:
     level: INFO
     log_dir: logs
-

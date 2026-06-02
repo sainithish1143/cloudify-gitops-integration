@@ -1,173 +1,173 @@
-# Cloudify Desired-State GitOps E2E
+# Cloudify GitOps: Environment + Workflow Intent Model
 
-This repository demonstrates a production-oriented GitOps mechanism for invoking Cloudify blueprint lifecycle operations.
+This repo demonstrates a production-style Cloudify integration that can be triggered by GitHub Actions today and by Jenkins later using the same scripts.
 
-The model is based on desired-state deployment files:
+## Core idea
 
 ```text
-deployments/<deployment-name>.yaml
+deployments/*.yaml commit  -> create/register Cloudify environment only
+operations/*.yaml commit   -> execute the requested Cloudify workflow
+deployments/*.yaml delete  -> uninstall/delete based on deletion policy
 ```
 
-Lifecycle is derived from Git changes:
+This avoids hardcoding `install` or `update` into GitOps. The user explicitly provides the Cloudify workflow name in an operation intent file.
+
+## Repo layout
 
 ```text
-Added deployment file    -> install
-Modified deployment file -> update
-Deleted deployment file  -> uninstall
-```
-
-Each deployment file owns its unique lifecycle configuration: blueprint, inputs, tenant, workflow, retry, timeout, and uninstall policy.
-
-## Structure
-
-```text
-.github/workflows/cloudify-desired-state.yml
-scripts/cloudify_lifecycle.py
-scripts/gitops_reconcile.py
-scripts/manual_lifecycle_from_deployment.py
-deployments/hello-dev.yaml
-blueprints/hello/blueprint.yaml
-blueprints/hello/scripts/lifecycle.py
+.github/workflows/cloudify-envops.yml
+scripts/
+  cloudify_lifecycle.py
+  gitops_reconcile.py
+  manual_lifecycle_from_deployment.py
+deployments/
+  hello-dev.yaml
+operations/
+  hello-dev-install.yaml
+  hello-dev-configure.yaml
+  hello-dev-uninstall.yaml
+blueprints/hello/
 inputs/hello/dev.yaml
+workflow-params/execute-configure.yaml
 ```
-
-## Demo input behavior
-
-`inputs/hello/dev.yaml` contains user/demo inputs:
-
-```yaml
-customer_name: "Demo Customer"
-application_name: "hello-gitops-service"
-environment: "dev"
-message: "This value came from GitOps input file and is visible in Cloudify execution logs"
-replicas: 2
-```
-
-During Cloudify blueprint execution, these values are printed in the Cloudify execution logs by `blueprints/hello/scripts/lifecycle.py`.
 
 ## GitHub setup
 
-Because `http://192.168.49.2` is a local Minikube IP, use a self-hosted GitHub Actions runner on the machine/network that can reach Cloudify.
+Use a self-hosted runner when Cloudify is on local Minikube, for example `http://192.168.49.2`.
 
-Add repository secrets:
-
-```text
-CFY_MANAGER_URL=http://192.168.49.2
-CFY_USERNAME=admin
-CFY_PASSWORD=admin
-CFY_TENANT=default_tenant
-```
-
-Add repository variables:
+Repository secrets:
 
 ```text
-CFY_API_VERSION=v3.1
-CFY_INSECURE=true
-GITOPS_MULTI_DEPLOYMENT_MODE=all
+CFY_MANAGER_URL = http://192.168.49.2
+CFY_USERNAME    = admin
+CFY_PASSWORD    = admin
+CFY_TENANT      = default_tenant
 ```
 
-## Commit-based GitOps
+Repository variables:
 
-### Install
-
-Create a new deployment desired-state file:
-
-```bash
-cp deployments/hello-dev.yaml deployments/app1-dev.yaml
-vi deployments/app1-dev.yaml
+```text
+CFY_API_VERSION = v3.1
+CFY_INSECURE = true
+GITOPS_MULTI_DEPLOYMENT_MODE = all
 ```
 
-Update `metadata.name`, `spec.blueprint.id`, `spec.deployment.id`, and input files if needed.
+## Demo flow
 
-Commit:
+### 1. Create Cloudify environment
+
+Commit the deployment desired-state file:
 
 ```bash
-git add deployments/app1-dev.yaml
-git commit -m "Add app1-dev Cloudify deployment"
+git add deployments/hello-dev.yaml
+git commit -m "Create hello dev Cloudify environment"
 git push
 ```
 
-The workflow detects the added file and runs install.
+Action: uploads/registers blueprint and creates Cloudify deployment. It does not run `install`.
 
-### Update
+### 2. Execute install workflow
 
-Modify the same deployment file or its referenced input file. For update based on deployment file modification:
+Commit operation intent:
 
 ```bash
-vi deployments/app1-dev.yaml
-git add deployments/app1-dev.yaml
-git commit -m "Update app1-dev Cloudify deployment"
+git add operations/hello-dev-install.yaml
+git commit -m "Run install workflow for hello dev"
 git push
 ```
 
-The workflow detects the modified file and runs update.
+Action: executes the workflow from the operation file:
 
-### Uninstall
-
-Delete the desired-state file:
-
-```bash
-git rm deployments/app1-dev.yaml
-git commit -m "Remove app1-dev Cloudify deployment"
-git push
+```yaml
+workflow: install
 ```
 
-The workflow reads the deleted file from the previous commit and runs uninstall for the correct deployment ID.
+### 3. Show user inputs in logs
 
-## Manual run from GitHub Actions
-
-Go to:
-
-```text
-Actions -> Cloudify Desired-State GitOps -> Run workflow
-```
-
-Inputs:
-
-```text
-deployment_file = deployments/hello-dev.yaml
-operation       = install | update | uninstall
-dry_run         = false | true
-```
-
-## Local Docker Compose run
-
-```bash
-cp .env.example .env
-vi .env
-./run-local.sh deployments/hello-dev.yaml install
-./run-local.sh deployments/hello-dev.yaml update
-./run-local.sh deployments/hello-dev.yaml uninstall
-```
-
-## Production notes
-
-- One deployment file represents one Cloudify deployment.
-- Each deployment can use a different blueprint and different inputs.
-- Delete operation uses previous Git content to know what to uninstall.
-- All Cloudify calls use retry/backoff, timeouts, logging, and JSON summaries.
-- Logs are uploaded as GitHub workflow artifacts.
-
-## Referenced input/blueprint change behavior
-
-The reconciler also handles production dependency changes:
-
-```text
-Change a deployment file             -> update that deployment
-Change an input file referenced by a deployment -> update that deployment
-Change a blueprint file under referenced blueprint source -> update that deployment
-Delete a deployment file             -> uninstall using previous Git content
-```
-
-This means user-provided input changes can be committed under `inputs/` and the impacted deployment will be updated automatically.
-
-Example:
+Update user/demo inputs:
 
 ```bash
 vi inputs/hello/dev.yaml
-git add inputs/hello/dev.yaml
-git commit -m "Update hello-dev demo input values"
+```
+
+Then commit an operation intent. For configure demo:
+
+```bash
+git add inputs/hello/dev.yaml operations/hello-dev-configure.yaml
+git commit -m "Run configure workflow with updated Git input values"
 git push
 ```
 
-The workflow finds deployments that reference `inputs/hello/dev.yaml` and runs update for those deployments.
+The operation uses `execute_operation` and injects the latest input values as `operation_kwargs`, so Cloudify execution logs show the committed input values.
+
+### 4. Execute any custom workflow
+
+Create a new operation file:
+
+```yaml
+apiVersion: cloudify.windriver.com/v1
+kind: CloudifyOperation
+
+metadata:
+  name: hello-dev-custom-workflow
+
+spec:
+  deployment_ref: deployments/hello-dev.yaml
+  workflow: my_custom_workflow
+  wait: true
+  timeout_sec: 3600
+  parameters:
+    key1: value1
+    key2: value2
+```
+
+Commit it:
+
+```bash
+git add operations/hello-dev-custom-workflow.yaml
+git commit -m "Run custom Cloudify workflow"
+git push
+```
+
+### 5. Delete deployment/environment
+
+For demo, `deployments/hello-dev.yaml` has:
+
+```yaml
+deletion_policy: auto_uninstall_delete
+```
+
+So deleting the deployment file runs uninstall and deletes the Cloudify deployment:
+
+```bash
+git rm deployments/hello-dev.yaml
+git commit -m "Remove hello dev Cloudify environment"
+git push
+```
+
+For production, set:
+
+```yaml
+deletion_policy: manual
+```
+
+Then users must commit an explicit uninstall operation before removing the deployment file.
+
+## Jenkins later
+
+Jenkins should use the same scripts:
+
+```bash
+python3 scripts/gitops_reconcile.py --before <old_sha> --after <new_sha>
+```
+
+Manual Jenkins jobs should use:
+
+```bash
+python3 scripts/manual_lifecycle_from_deployment.py \
+  --deployment deployments/hello-dev.yaml \
+  --action execute-workflow \
+  --workflow install
+```
+
+So Jenkins and GitOps share the same deployment model and lifecycle engine.

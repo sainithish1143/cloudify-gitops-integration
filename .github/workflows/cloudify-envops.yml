@@ -1,0 +1,113 @@
+name: Cloudify Environment + Workflow GitOps
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Manual action mode"
+        required: true
+        default: "create-environment"
+        type: choice
+        options:
+          - create-environment
+          - execute-workflow
+          - uninstall
+          - delete-environment
+      deployment_file:
+        description: "Deployment desired-state file"
+        required: true
+        default: "deployments/hello-dev.yaml"
+      workflow:
+        description: "Cloudify workflow name for execute-workflow/uninstall"
+        required: false
+        default: "install"
+      parameters_file:
+        description: "Optional YAML workflow parameters file"
+        required: false
+        default: ""
+      inject_inputs_as_operation_kwargs:
+        description: "For execute_operation, pass latest input values as operation_kwargs"
+        required: false
+        default: "false"
+  push:
+    paths:
+      - "deployments/**"
+      - "operations/**"
+      - "blueprints/**"
+      - "inputs/**"
+      - "scripts/**"
+      - ".github/workflows/cloudify-envops.yml"
+
+jobs:
+  reconcile:
+    name: Reconcile Cloudify environment and workflow intent
+    runs-on: self-hosted
+
+    env:
+      CFY_MANAGER_URL: ${{ secrets.CFY_MANAGER_URL }}
+      CFY_USERNAME: ${{ secrets.CFY_USERNAME }}
+      CFY_PASSWORD: ${{ secrets.CFY_PASSWORD }}
+      CFY_TENANT: ${{ secrets.CFY_TENANT }}
+      CFY_API_VERSION: ${{ vars.CFY_API_VERSION || 'v3.1' }}
+      CFY_INSECURE: ${{ vars.CFY_INSECURE || 'true' }}
+      GITOPS_MULTI_DEPLOYMENT_MODE: ${{ vars.GITOPS_MULTI_DEPLOYMENT_MODE || 'all' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate local Python
+        run: |
+          which python3
+          python3 --version
+          python3 -m pip --version
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt
+
+      - name: Validate required secrets
+        run: |
+          test -n "$CFY_MANAGER_URL" || (echo "CFY_MANAGER_URL is missing" && exit 1)
+          test -n "$CFY_USERNAME" || (echo "CFY_USERNAME is missing" && exit 1)
+          test -n "$CFY_PASSWORD" || (echo "CFY_PASSWORD is missing" && exit 1)
+          test -n "$CFY_TENANT" || (echo "CFY_TENANT is missing" && exit 1)
+
+      - name: Manual Cloudify action
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          EXTRA=""
+          if [ "${{ github.event.inputs.inject_inputs_as_operation_kwargs }}" = "true" ]; then
+            EXTRA="$EXTRA --inject-inputs-as-operation-kwargs"
+          fi
+          if [ -n "${{ github.event.inputs.parameters_file }}" ]; then
+            EXTRA="$EXTRA --parameters-file '${{ github.event.inputs.parameters_file }}'"
+          fi
+          python3 scripts/manual_lifecycle_from_deployment.py \
+            --deployment "${{ github.event.inputs.deployment_file }}" \
+            --action "${{ github.event.inputs.mode }}" \
+            --workflow "${{ github.event.inputs.workflow }}" \
+            $EXTRA
+
+      - name: Commit-based Cloudify reconcile
+        if: github.event_name == 'push'
+        run: |
+          BEFORE="${{ github.event.before }}"
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            BEFORE="$(git rev-list --max-parents=0 HEAD)"
+          fi
+          python3 scripts/gitops_reconcile.py \
+            --before "$BEFORE" \
+            --after "${{ github.sha }}" \
+            --mode "$GITOPS_MULTI_DEPLOYMENT_MODE"
+
+      - name: Upload lifecycle logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudify-envops-logs
+          path: logs/
+          if-no-files-found: ignore

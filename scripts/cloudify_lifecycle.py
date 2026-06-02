@@ -96,6 +96,7 @@ class LifecycleRequest:
     inputs_files: list[Path]
     inputs: Dict[str, Any]
     workflow: str
+    workflow_parameters: Dict[str, Any]
     wait: bool
     request_timeout_sec: int
     execution_timeout_sec: int
@@ -111,8 +112,8 @@ class LifecycleRequest:
     @staticmethod
     def from_dict(data: Dict[str, Any], base_dir: Path) -> "LifecycleRequest":
         operation = _strip(data.get("operation") or data.get("workflow") or "").lower()
-        if operation not in {"install", "update", "uninstall", "execute", "delete"}:
-            raise ValueError("operation must be one of install, update, uninstall, execute, delete")
+        if operation not in {"create_environment", "execute_workflow", "delete_environment", "install", "update", "uninstall", "execute", "delete"}:
+            raise ValueError("operation must be one of create_environment, execute_workflow, delete_environment, install, update, uninstall, execute, delete")
 
         manager_url = _strip(data.get("manager_url") or os.getenv("CFY_MANAGER_URL")).rstrip("/")
         username = _strip(data.get("username") or os.getenv("CFY_USERNAME"))
@@ -127,6 +128,9 @@ class LifecycleRequest:
         inputs_files = [(base_dir / _strip(p)).resolve() for p in data.get("inputs_files", [])]
         inputs = data.get("inputs") or {}
         workflow = _strip(data.get("workflow") or operation)
+        workflow_parameters = data.get("workflow_parameters") or data.get("parameters") or {}
+        if not isinstance(workflow_parameters, dict):
+            raise ValueError("workflow_parameters/parameters must be a YAML object")
         log_dir = (base_dir / _strip(data.get("log_dir") or "logs")).resolve()
 
         req = LifecycleRequest(
@@ -144,6 +148,7 @@ class LifecycleRequest:
             inputs_files=inputs_files,
             inputs=inputs,
             workflow=workflow,
+            workflow_parameters=workflow_parameters,
             wait=_bool(data.get("wait"), True),
             request_timeout_sec=int(data.get("request_timeout_sec", 60)),
             execution_timeout_sec=int(data.get("execution_timeout_sec", 3600)),
@@ -168,7 +173,7 @@ class LifecycleRequest:
             missing.append("blueprint_id")
         if missing:
             raise ValueError("Missing required values: " + ", ".join(missing))
-        if self.operation in {"install", "update"}:
+        if self.operation in {"create_environment", "install", "update"}:
             if not self.blueprint_dir.is_dir():
                 raise FileNotFoundError(f"blueprint_dir not found: {self.blueprint_dir}")
             if not (self.blueprint_dir / self.application_file).is_file():
@@ -261,35 +266,12 @@ class CloudifyClient:
         return True
 
     def create_blueprint_zip(self) -> Path:
-        """Create a Cloudify-compatible blueprint archive.
-
-        Cloudify expects the uploaded archive to contain exactly one top-level
-        directory. The blueprint files must be inside that directory, for example:
-
-            hello/blueprint.yaml
-            hello/scripts/lifecycle.py
-
-        Zipping only the contents of blueprints/hello directly at archive root
-        causes Cloudify to fail extraction with:
-            "Archive must contain exactly 1 directory".
-        """
         temp_dir = Path(tempfile.mkdtemp(prefix="cfy-bp-"))
         zip_path = temp_dir / f"{self.req.blueprint_id}.zip"
-        top_dir = self.req.blueprint_dir.name
-
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for file_path in sorted(self.req.blueprint_dir.rglob("*")):
+            for file_path in self.req.blueprint_dir.rglob("*"):
                 if file_path.is_file():
-                    relative = Path(top_dir) / file_path.relative_to(self.req.blueprint_dir)
-                    archive.write(file_path, relative.as_posix())
-
-        # Defensive validation to catch accidental bad archives before calling Cloudify.
-        with zipfile.ZipFile(zip_path, "r") as archive:
-            top_level = {Path(name).parts[0] for name in archive.namelist() if Path(name).parts}
-            if len(top_level) != 1:
-                raise RuntimeError(
-                    f"Invalid blueprint archive {zip_path}: expected exactly one top-level directory, found {sorted(top_level)}"
-                )
+                    archive.write(file_path, file_path.relative_to(self.req.blueprint_dir))
         return zip_path
 
     def upload_blueprint(self) -> None:
@@ -315,7 +297,9 @@ class CloudifyClient:
 
     def start_execution(self, workflow: str) -> str:
         self.logger.info("Starting workflow '%s' on deployment '%s'", workflow, self.req.deployment_id)
-        payload = {"deployment_id": self.req.deployment_id, "workflow_id": workflow, "parameters": {}, "allow_custom_parameters": True}
+        if self.req.workflow_parameters:
+            self.logger.info("Workflow parameters: %s", json.dumps(self.req.workflow_parameters, sort_keys=True))
+        payload = {"deployment_id": self.req.deployment_id, "workflow_id": workflow, "parameters": self.req.workflow_parameters, "allow_custom_parameters": True}
         response = self._request("POST", "/executions", json=payload)
         self._ensure_ok(response, {200, 201})
         execution_id = response.json().get("id")
@@ -377,7 +361,16 @@ def execute(req: LifecycleRequest, logger: logging.Logger) -> Dict[str, Any]:
     client = CloudifyClient(req, logger)
     client.authenticate()
 
-    if req.operation in {"install", "update"}:
+    if req.operation == "create_environment":
+        client.upload_blueprint()
+        if not client.deployment_exists(req.deployment_id):
+            client.create_deployment()
+            logger.info("Cloudify environment/deployment '%s' created", req.deployment_id)
+        else:
+            logger.info("Cloudify environment/deployment '%s' already exists; create_environment is idempotent", req.deployment_id)
+
+    elif req.operation in {"install", "update"}:
+        # Backward-compatible mode: create/reuse environment and immediately execute the workflow.
         client.upload_blueprint()
         if not client.deployment_exists(req.deployment_id):
             client.create_deployment()
@@ -388,9 +381,9 @@ def execute(req: LifecycleRequest, logger: logging.Logger) -> Dict[str, Any]:
         if req.wait:
             summary["execution_status"] = client.wait_for_execution(execution_id)
 
-    elif req.operation in {"execute"}:
+    elif req.operation in {"execute", "execute_workflow"}:
         if not client.deployment_exists(req.deployment_id):
-            raise RuntimeError(f"Deployment not found: {req.deployment_id}")
+            raise RuntimeError(f"Deployment not found: {req.deployment_id}. Commit the deployment desired-state file first to create the environment.")
         execution_id = client.start_execution(req.workflow)
         summary["execution_id"] = execution_id
         if req.wait:
@@ -409,7 +402,7 @@ def execute(req: LifecycleRequest, logger: logging.Logger) -> Dict[str, Any]:
         if req.delete_blueprint:
             client.delete_blueprint()
 
-    elif req.operation == "delete":
+    elif req.operation in {"delete", "delete_environment"}:
         if req.delete_deployment:
             client.delete_deployment()
         if req.delete_blueprint and req.blueprint_id:

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""GitOps desired-state reconciler for Cloudify deployments.
+"""GitOps reconciler for Cloudify environment + operation intent model.
 
-It derives lifecycle operation from Git diff status on files under deployments/:
-  A/R/C -> install
-  M     -> update
-  D     -> uninstall, using the previous file content from the before commit
+Production model:
+  deployments/*.yaml added/modified  -> create/register Cloudify environment only
+  operations/*.yaml added/modified   -> execute the requested Cloudify workflow
+  deployments/*.yaml deleted         -> uninstall/delete based on deletion policy
+  operations/*.yaml deleted          -> no Cloudify action; removes intent from Git
 
-It generates normalized lifecycle request YAML files and invokes cloudify_lifecycle.py.
+This script is trigger-agnostic and can be used by GitHub Actions or Jenkins.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -20,7 +20,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -54,7 +54,7 @@ def run_cmd(cmd: List[str], cwd: Path, check: bool = True) -> str:
 def load_yaml_text(text: str, source: str) -> Dict[str, Any]:
     data = yaml.safe_load(text) or {}
     if not isinstance(data, dict):
-        raise ValueError(f"Deployment spec must be a YAML object: {source}")
+        raise ValueError(f"YAML must be an object: {source}")
     return data
 
 
@@ -62,24 +62,8 @@ def load_yaml_file(path: Path) -> Dict[str, Any]:
     return load_yaml_text(path.read_text(encoding="utf-8"), str(path))
 
 
-def get_changed_deployment_files(repo: Path, before: str, after: str) -> List[Tuple[str, str]]:
-    output = run_cmd(["git", "diff", "--name-status", before, after, "--", "deployments"], repo, check=True)
-    changes: List[Tuple[str, str]] = []
-    for line in output.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\t")
-        status = parts[0]
-        if status.startswith("R") or status.startswith("C"):
-            path = parts[-1]
-            status_key = status[0]
-        else:
-            path = parts[-1]
-            status_key = status[0]
-        if path.startswith("deployments/") and path.endswith((".yaml", ".yml")):
-            changes.append((status_key, path))
-    return changes
-
+def previous_file_content(repo: Path, before: str, path: str) -> str:
+    return run_cmd(["git", "show", f"{before}:{path}"], repo, check=True)
 
 
 def get_changed_files(repo: Path, before: str, after: str) -> List[Tuple[str, str]]:
@@ -89,121 +73,22 @@ def get_changed_files(repo: Path, before: str, after: str) -> List[Tuple[str, st
         if not line.strip():
             continue
         parts = line.split("\t")
-        status = parts[0]
-        if status.startswith("R") or status.startswith("C"):
-            path = parts[-1]
-            status_key = status[0]
-        else:
-            path = parts[-1]
-            status_key = status[0]
-        changes.append((status_key, path))
+        raw_status = parts[0]
+        status = raw_status[0]
+        path = parts[-1]
+        changes.append((status, path))
     return changes
 
 
-def deployment_references_path(spec: Dict[str, Any], changed_path: str) -> bool:
-    body = spec.get("spec") or {}
-    blueprint = body.get("blueprint") or {}
-    deployment = body.get("deployment") or {}
-    blueprint_source = str(blueprint.get("source", "")).rstrip("/")
-    if blueprint_source and (changed_path == blueprint_source or changed_path.startswith(blueprint_source + "/")):
-        return True
-    for input_file in deployment.get("inputs", []) or []:
-        if changed_path == str(input_file):
-            return True
-    return False
-
-
-def discover_dependency_update_deployments(repo: Path, changed_files: List[Tuple[str, str]], already_handled_paths: set[str], logger: logging.Logger) -> List[Tuple[str, str]]:
-    dependency_paths = []
-    for status, path in changed_files:
-        if path.startswith("deployments/"):
-            continue
-        if path.startswith(("inputs/", "blueprints/")) and status in {"A", "M", "D", "R", "C"}:
-            dependency_paths.append(path)
-    if not dependency_paths:
-        return []
-
-    updates: List[Tuple[str, str]] = []
-    seen: set[str] = set()
-    for deployment_file in sorted(repo.glob("deployments/**/*.y*ml")):
-        rel = str(deployment_file.relative_to(repo))
-        if rel in already_handled_paths:
-            continue
-        try:
-            spec = load_yaml_file(deployment_file)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Skipping invalid deployment spec %s while checking dependency changes: %s", rel, exc)
-            continue
-        for changed_path in dependency_paths:
-            if deployment_references_path(spec, changed_path):
-                if rel not in seen:
-                    updates.append(("M", rel))
-                    seen.add(rel)
-                    logger.info("Dependency change %s affects %s; scheduling update", changed_path, rel)
-                break
-    return updates
-
-def previous_file_content(repo: Path, before: str, path: str) -> str:
-    return run_cmd(["git", "show", f"{before}:{path}"], repo, check=True)
-
-
-def normalize_deployment_spec(spec: Dict[str, Any], operation: str, repo: Path) -> Dict[str, Any]:
-    if spec.get("kind") != "CloudifyDeployment":
-        raise ValueError("kind must be CloudifyDeployment")
-    metadata = spec.get("metadata") or {}
-    body = spec.get("spec") or {}
-    if not isinstance(metadata, dict) or not isinstance(body, dict):
-        raise ValueError("metadata and spec must be objects")
-    enabled = body.get("enabled", True)
-    if enabled is False and operation != "uninstall":
-        raise RuntimeError(f"Deployment spec {metadata.get('name')} is disabled; skipping non-uninstall operation")
-
-    blueprint = body.get("blueprint") or {}
-    deployment = body.get("deployment") or {}
-    lifecycle = body.get("lifecycle") or {}
-    execution = body.get("execution") or {}
-    logging_cfg = body.get("logging") or {}
-    manager = body.get("manager") or {}
-
-    lifecycle_cfg = lifecycle.get(operation) or {}
-    if operation == "update" and not lifecycle_cfg:
-        lifecycle_cfg = lifecycle.get("install") or {}
-    if operation == "uninstall" and not lifecycle_cfg:
-        lifecycle_cfg = {"workflow": "uninstall", "wait": True, "timeout_sec": 3600, "delete_deployment": True, "delete_blueprint": False}
-
-    deployment_id = _strip(deployment.get("id") or metadata.get("name"))
-    blueprint_id = _strip(blueprint.get("id") or f"{deployment_id}-bp")
-    if not deployment_id:
-        raise ValueError("spec.deployment.id or metadata.name is required")
-
-    request = {
-        "operation": operation,
-        "manager_url": "${CFY_MANAGER_URL}",
-        "username": "${CFY_USERNAME}",
-        "password": "${CFY_PASSWORD}",
-        "tenant": manager.get("tenant", "${CFY_TENANT}"),
-        "api_version": "${CFY_API_VERSION:-v3.1}",
-        "insecure": "${CFY_INSECURE:-true}",
-        "blueprint_id": blueprint_id,
-        "deployment_id": deployment_id,
-        "blueprint_dir": blueprint.get("source", ""),
-        "application_file": blueprint.get("application_file", "blueprint.yaml"),
-        "inputs_files": deployment.get("inputs", []),
-        "inputs": deployment.get("inline_inputs", {}),
-        "workflow": lifecycle_cfg.get("workflow", operation),
-        "wait": lifecycle_cfg.get("wait", True),
-        "request_timeout_sec": execution.get("request_timeout_sec", 60),
-        "execution_timeout_sec": lifecycle_cfg.get("timeout_sec", execution.get("execution_timeout_sec", 3600)),
-        "poll_interval_sec": execution.get("poll_interval_sec", 10),
-        "retry_count": execution.get("retry_count", 5),
-        "retry_backoff_sec": execution.get("retry_backoff_sec", 5),
-        "delete_deployment": lifecycle_cfg.get("delete_deployment", operation == "uninstall"),
-        "delete_blueprint": lifecycle_cfg.get("delete_blueprint", False),
-        "dry_run": body.get("dry_run", False),
-        "log_level": logging_cfg.get("level", "INFO"),
-        "log_dir": logging_cfg.get("log_dir", "logs"),
-    }
-    return request
+def merge_yaml_files(repo: Path, files: List[str]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for rel in files or []:
+        path = repo / rel
+        if not path.is_file():
+            raise FileNotFoundError(f"Input file referenced by deployment was not found: {rel}")
+        data = load_yaml_file(path)
+        merged.update(data)
+    return merged
 
 
 def expand_env_vars(obj: Any) -> Any:
@@ -212,7 +97,6 @@ def expand_env_vars(obj: Any) -> Any:
     if isinstance(obj, list):
         return [expand_env_vars(v) for v in obj]
     if isinstance(obj, str):
-        # Supports ${VAR} and ${VAR:-default}
         import re
         pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}")
         def repl(match):
@@ -223,81 +107,198 @@ def expand_env_vars(obj: Any) -> Any:
     return obj
 
 
-def write_request(request: Dict[str, Any], temp_dir: Path, deployment_id: str, operation: str) -> Path:
-    path = temp_dir / f"{deployment_id}-{operation}.request.yaml"
+def validate_deployment_spec(spec: Dict[str, Any], source: str) -> None:
+    if spec.get("kind") != "CloudifyDeployment":
+        raise ValueError(f"{source}: kind must be CloudifyDeployment")
+    body = spec.get("spec") or {}
+    if not isinstance(body, dict):
+        raise ValueError(f"{source}: spec must be an object")
+    if not _strip(((body.get("deployment") or {}).get("id")) or ((spec.get("metadata") or {}).get("name"))):
+        raise ValueError(f"{source}: spec.deployment.id or metadata.name is required")
+    if not _strip(((body.get("blueprint") or {}).get("source"))):
+        raise ValueError(f"{source}: spec.blueprint.source is required")
+
+
+def deployment_to_request(spec: Dict[str, Any], operation: str, repo: Path, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    validate_deployment_spec(spec, "deployment")
+    metadata = spec.get("metadata") or {}
+    body = spec.get("spec") or {}
+    manager = body.get("manager") or {}
+    blueprint = body.get("blueprint") or {}
+    deployment = body.get("deployment") or {}
+    execution = body.get("execution") or {}
+    logging_cfg = body.get("logging") or {}
+
+    deployment_id = _strip(deployment.get("id") or metadata.get("name"))
+    blueprint_id = _strip(blueprint.get("id") or f"{deployment_id}-bp")
+
+    request = {
+        "operation": operation,
+        "manager_url": "${CFY_MANAGER_URL}",
+        "username": "${CFY_USERNAME}",
+        "password": "${CFY_PASSWORD}",
+        "tenant": manager.get("tenant", "${CFY_TENANT:-default_tenant}"),
+        "api_version": "${CFY_API_VERSION:-v3.1}",
+        "insecure": "${CFY_INSECURE:-true}",
+        "blueprint_id": blueprint_id,
+        "deployment_id": deployment_id,
+        "blueprint_dir": blueprint.get("source"),
+        "application_file": blueprint.get("application_file", "blueprint.yaml"),
+        "inputs_files": deployment.get("inputs", []),
+        "inputs": deployment.get("inline_inputs", {}),
+        "workflow": "",
+        "workflow_parameters": {},
+        "wait": True,
+        "request_timeout_sec": execution.get("request_timeout_sec", 60),
+        "execution_timeout_sec": execution.get("execution_timeout_sec", 3600),
+        "poll_interval_sec": execution.get("poll_interval_sec", 10),
+        "retry_count": execution.get("retry_count", 5),
+        "retry_backoff_sec": execution.get("retry_backoff_sec", 5),
+        "delete_deployment": False,
+        "delete_blueprint": False,
+        "dry_run": body.get("dry_run", False),
+        "log_level": logging_cfg.get("level", "INFO"),
+        "log_dir": logging_cfg.get("log_dir", "logs"),
+    }
+    if extra:
+        request.update(extra)
+    return request
+
+
+def operation_to_request(op_spec: Dict[str, Any], repo: Path) -> Dict[str, Any]:
+    if op_spec.get("kind") != "CloudifyOperation":
+        raise ValueError("operation file kind must be CloudifyOperation")
+    spec = op_spec.get("spec") or {}
+    deployment_ref = _strip(spec.get("deployment_ref"))
+    if not deployment_ref:
+        raise ValueError("CloudifyOperation spec.deployment_ref is required")
+    dep_path = repo / deployment_ref
+    if not dep_path.is_file():
+        raise FileNotFoundError(f"Operation references missing deployment file: {deployment_ref}")
+    dep_spec = load_yaml_file(dep_path)
+
+    workflow = _strip(spec.get("workflow"))
+    if not workflow:
+        raise ValueError("CloudifyOperation spec.workflow is required")
+    parameters = spec.get("parameters") or {}
+    if not isinstance(parameters, dict):
+        raise ValueError("CloudifyOperation spec.parameters must be an object")
+
+    # Optional helper for execute_operation: inject latest Git input values as operation_kwargs.
+    policy = spec.get("parameter_policy") or {}
+    if policy.get("inject_inputs_as_operation_kwargs") is True:
+        dep_body = dep_spec.get("spec") or {}
+        dep_deployment = dep_body.get("deployment") or {}
+        merged_inputs = merge_yaml_files(repo, dep_deployment.get("inputs", []) or [])
+        merged_inputs.update(dep_deployment.get("inline_inputs", {}) or {})
+        existing_kwargs = parameters.get("operation_kwargs") or {}
+        if not isinstance(existing_kwargs, dict):
+            raise ValueError("parameters.operation_kwargs must be an object when present")
+        parameters["operation_kwargs"] = {**merged_inputs, **existing_kwargs}
+
+    extra = {
+        "operation": "execute_workflow",
+        "workflow": workflow,
+        "workflow_parameters": parameters,
+        "wait": spec.get("wait", True),
+        "execution_timeout_sec": spec.get("timeout_sec", 3600),
+    }
+    return deployment_to_request(dep_spec, "execute_workflow", repo, extra)
+
+
+def write_request(request: Dict[str, Any], temp_dir: Path, name: str) -> Path:
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in name)
+    path = temp_dir / f"{safe}.request.yaml"
     path.write_text(yaml.safe_dump(expand_env_vars(request), sort_keys=False), encoding="utf-8")
     return path
 
 
-def execute_request(repo: Path, request_path: Path, logger: logging.Logger) -> int:
+def execute_request(repo: Path, request_path: Path, logger: logging.Logger, dry_run: bool) -> int:
     cmd = [sys.executable, "scripts/cloudify_lifecycle.py", "--request", str(request_path)]
     logger.info("Executing: %s", " ".join(cmd))
-    process = subprocess.run(cmd, cwd=str(repo), text=True)
-    return process.returncode
+    if dry_run:
+        logger.info("Dry-run enabled at reconciler level; not invoking lifecycle runner")
+        return 0
+    return subprocess.run(cmd, cwd=str(repo), text=True).returncode
+
+
+def build_actions(repo: Path, before: str, changes: List[Tuple[str, str]], logger: logging.Logger) -> List[Tuple[str, str, Dict[str, Any]]]:
+    actions: List[Tuple[str, str, Dict[str, Any]]] = []
+    for status, path in changes:
+        if path.startswith("deployments/") and path.endswith((".yaml", ".yml")):
+            if status == "D":
+                dep_spec = load_yaml_text(previous_file_content(repo, before, path), f"{before}:{path}")
+                policies = ((dep_spec.get("spec") or {}).get("policies") or {})
+                deletion_policy = _strip(policies.get("deletion_policy") or "manual")
+                if deletion_policy == "manual":
+                    raise RuntimeError(f"{path} was deleted but deletion_policy=manual. Commit an explicit uninstall operation first or set deletion_policy=auto_uninstall_delete/delete_only.")
+                if deletion_policy == "auto_uninstall_delete":
+                    extra = {
+                        "operation": "uninstall",
+                        "workflow": policies.get("uninstall_workflow", "uninstall"),
+                        "wait": True,
+                        "delete_deployment": True,
+                        "delete_blueprint": bool(policies.get("delete_blueprint_on_delete", False)),
+                    }
+                    actions.append((path, "uninstall", deployment_to_request(dep_spec, "uninstall", repo, extra)))
+                elif deletion_policy == "delete_only":
+                    extra = {"operation": "delete_environment", "delete_deployment": True, "delete_blueprint": bool(policies.get("delete_blueprint_on_delete", False))}
+                    actions.append((path, "delete_environment", deployment_to_request(dep_spec, "delete_environment", repo, extra)))
+                else:
+                    raise ValueError(f"Unsupported deletion_policy for {path}: {deletion_policy}")
+            elif status in {"A", "M", "R", "C"}:
+                dep_spec = load_yaml_file(repo / path)
+                actions.append((path, "create_environment", deployment_to_request(dep_spec, "create_environment", repo)))
+
+        elif path.startswith("operations/") and path.endswith((".yaml", ".yml")):
+            if status == "D":
+                logger.info("Operation intent file removed: %s. No Cloudify action is taken for operation deletion.", path)
+                continue
+            if status in {"A", "M", "R", "C"}:
+                op_spec = load_yaml_file(repo / path)
+                actions.append((path, "execute_workflow", operation_to_request(op_spec, repo)))
+    return actions
 
 
 def reconcile(repo: Path, before: str, after: str, mode: str, dry_run: bool, logger: logging.Logger) -> int:
-    all_changes = get_changed_files(repo, before, after)
-    changes = get_changed_deployment_files(repo, before, after)
-    handled_paths = {path for _, path in changes}
-    dependency_updates = discover_dependency_update_deployments(repo, all_changes, handled_paths, logger)
-    changes.extend(dependency_updates)
-
-    if not changes:
-        logger.info("No deployment desired-state changes or referenced blueprint/input changes detected. Nothing to reconcile.")
+    changes = get_changed_files(repo, before, after)
+    candidate_changes = [(s, p) for s, p in changes if p.startswith(("deployments/", "operations/")) and p.endswith((".yaml", ".yml"))]
+    if not candidate_changes:
+        logger.info("No deployment or operation intent changes detected. Nothing to do.")
         return 0
 
-    if mode == "first" and len(changes) > 1:
-        changes = changes[:1]
-    elif mode == "fail" and len(changes) > 1:
-        raise RuntimeError(f"Multiple deployment changes detected but GITOPS_MULTI_DEPLOYMENT_MODE=fail: {changes}")
+    actions = build_actions(repo, before, candidate_changes, logger)
+    if not actions:
+        logger.info("No executable Cloudify actions generated.")
+        return 0
+    if mode == "first" and len(actions) > 1:
+        actions = actions[:1]
+    elif mode == "fail" and len(actions) > 1:
+        raise RuntimeError(f"Multiple actions detected but mode=fail: {[(a,b) for a,b,_ in actions]}")
 
-    logger.info("Deployment reconcile actions: %s", changes)
-    temp_dir = Path(tempfile.mkdtemp(prefix="cfy-gitops-requests-"))
+    logger.info("Cloudify actions: %s", [(p, op) for p, op, _ in actions])
+    temp_dir = Path(tempfile.mkdtemp(prefix="cfy-envops-requests-"))
     failures = 0
     summary = []
-
-    for status, rel_path in changes:
-        logger.info("Reconciling %s status=%s", rel_path, status)
-        if status == "D":
-            spec = load_yaml_text(previous_file_content(repo, before, rel_path), f"{before}:{rel_path}")
-            operation = "uninstall"
-        elif status in {"A", "C", "R"}:
-            spec = load_yaml_file(repo / rel_path)
-            operation = "install"
-        elif status == "M":
-            spec = load_yaml_file(repo / rel_path)
-            # Optional explicit force operation for rare cases.
-            operation = _strip((spec.get("spec") or {}).get("force_operation") or "update").lower()
-            if operation not in {"install", "update", "uninstall"}:
-                raise ValueError(f"Invalid force_operation in {rel_path}: {operation}")
-        else:
-            logger.info("Ignoring unsupported git status %s for %s", status, rel_path)
-            continue
-
-        request = normalize_deployment_spec(spec, operation, repo)
-        deployment_id = request["deployment_id"]
-        if dry_run:
-            request["dry_run"] = True
-        request_path = write_request(request, temp_dir, deployment_id, operation)
+    for path, op, request in actions:
+        name = f"{Path(path).stem}-{op}"
+        request_path = write_request(request, temp_dir, name)
         logger.info("Generated lifecycle request: %s", request_path)
-        logger.info("Request summary: operation=%s deployment_id=%s blueprint_id=%s", operation, deployment_id, request.get("blueprint_id"))
-        rc = execute_request(repo, request_path, logger)
-        summary.append({"path": rel_path, "status": status, "operation": operation, "deployment_id": deployment_id, "returncode": rc})
+        logger.info("Request summary: operation=%s workflow=%s deployment_id=%s blueprint_id=%s", request.get("operation"), request.get("workflow"), request.get("deployment_id"), request.get("blueprint_id"))
+        rc = execute_request(repo, request_path, logger, dry_run)
+        summary.append({"path": path, "operation": op, "deployment_id": request.get("deployment_id"), "workflow": request.get("workflow"), "returncode": rc})
         if rc != 0:
             failures += 1
 
     (repo / "logs").mkdir(exist_ok=True)
-    summary_file = repo / "logs" / "gitops-reconcile-summary.json"
-    summary_file.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
-    logger.info("Reconcile summary written to %s", summary_file)
+    (repo / "logs" / "gitops-reconcile-summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     return 1 if failures else 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Reconcile Cloudify deployment desired-state from Git diff")
-    parser.add_argument("--before", required=True, help="Before Git SHA")
-    parser.add_argument("--after", required=True, help="After Git SHA")
+    parser = argparse.ArgumentParser(description="Reconcile Cloudify environment + operation intent from Git diff")
+    parser.add_argument("--before", required=True)
+    parser.add_argument("--after", required=True)
     parser.add_argument("--mode", default=os.getenv("GITOPS_MULTI_DEPLOYMENT_MODE", "all"), choices=["all", "first", "fail"])
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -305,11 +306,11 @@ def main() -> int:
     repo = Path.cwd()
     run_id = uuid.uuid4().hex[:12]
     logger = setup_logging(repo / "logs", run_id, os.getenv("GITOPS_LOG_LEVEL", "INFO"))
-    logger.info("GitOps reconcile run_id=%s before=%s after=%s mode=%s", run_id, args.before, args.after, args.mode)
+    logger.info("GitOps envops reconcile run_id=%s before=%s after=%s mode=%s", run_id, args.before, args.after, args.mode)
     try:
         return reconcile(repo, args.before, args.after, args.mode, args.dry_run, logger)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("GitOps reconcile failed: %s", exc)
+        logger.exception("GitOps envops reconcile failed: %s", exc)
         return 1
 
 

@@ -1,0 +1,12 @@
+apiVersion: cloudify.windriver.com/v1
+kind: CloudifyOperation
+
+metadata:
+  name: hello-dev-install
+
+spec:
+  deployment_ref: deployments/hello-dev.yaml
+  workflow: install
+  wait: true
+  timeout_sec: 3600
+  parameters: {}
