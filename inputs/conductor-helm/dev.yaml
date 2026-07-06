@@ -1,0 +1,7 @@
+release_name: "nginx-cicd"
+namespace: "cicd-demo"
+chart_version: "1.27"
+chart_repo: "docker.io/library/nginx"
+override_values: "none"
+image_registry: "docker.io/library"
+replica_count: 2

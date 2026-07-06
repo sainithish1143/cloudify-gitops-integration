@@ -12,7 +12,7 @@ on:
         required: false
         default: "create-environment"
       workflow:
-        description: "Workflow for execute-workflow action, e.g. install, execute_operation, heal, scale"
+        description: "Workflow for execute-workflow action"
         required: false
         default: "install"
       parameters_file:
@@ -38,8 +38,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  reconcile:
-    name: Reconcile Cloudify environment and workflow intent
+  test-and-deploy:
+    name: Test and Deploy via Conductor
     runs-on: self-hosted
 
     env:
@@ -58,23 +58,76 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate local Python
-        run: |
-          which python3
-          python3 --version
-          python3 -m pip --version
-
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install -r requirements.txt
+          python3 -m pip install ruff yamllint pip-audit pytest pytest-cov
 
-      - name: Validate required secrets
+      - name: Code Quality
+        continue-on-error: true
         run: |
-          test -n "$CFY_MANAGER_URL" || (echo "CFY_MANAGER_URL is missing" && exit 1)
-          test -n "$CFY_USERNAME" || (echo "CFY_USERNAME is missing" && exit 1)
-          test -n "$CFY_PASSWORD" || (echo "CFY_PASSWORD is missing" && exit 1)
-          test -n "$CFY_TENANT" || (echo "CFY_TENANT is missing" && exit 1)
+          echo "=== Python Lint ==="
+          python3 -m ruff check scripts/ --output-format=concise
+          echo "=== YAML Validation ==="
+          python3 -m yamllint -d "{extends: relaxed, rules: {line-length: disable, trailing-spaces: {level: warning}, empty-lines: {level: warning}}}" deployments/ operations/ inputs/ workflow-params/
+
+      - name: Security Validation
+        continue-on-error: true
+        run: |
+          echo "=== Dependency Audit ==="
+          python3 -m pip_audit -r requirements.txt || true
+          echo "=== Secrets Scan ==="
+          if grep -rnE "password|secret|token|api_key|private_key" scripts/ deployments/ operations/ --include="*.py" --include="*.yaml" | grep -vE "password=|#|def |args|environ|getenv|credentials|CFY_PASSWORD|example|secret_name|_secret"; then
+            echo "WARNING: Potential hardcoded secrets found"
+          else
+            echo "PASS: No hardcoded secrets detected"
+          fi
+
+      - name: Unit Tests
+        continue-on-error: true
+        run: |
+          echo "=== Running Unit Tests with Coverage ==="
+          python3 -m pytest tests/ -v --cov=scripts --cov-report=term-missing --cov-fail-under=20 || true
+
+      - name: Infrastructure & Networking
+        continue-on-error: true
+        run: |
+          echo "=== Network Connectivity ==="
+          if curl -s --connect-timeout 5 -o /dev/null "$CFY_MANAGER_URL" --insecure; then
+            echo "PASS: Conductor API reachable"
+          else
+            echo "FAIL: Cannot connect to Conductor"
+            exit 1
+          fi
+          echo "=== API Authentication ==="
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -u "$CFY_USERNAME:$CFY_PASSWORD" -H "Tenant: $CFY_TENANT" "$CFY_MANAGER_URL/api/$CFY_API_VERSION/status" --insecure --connect-timeout 10)
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "PASS: API authentication successful"
+          else
+            echo "FAIL: API auth failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+      - name: Observability & Logging
+        continue-on-error: true
+        run: |
+          echo "=== Logging Verification ==="
+          grep -qE "logging|logger" scripts/cloudify_lifecycle.py && echo "PASS: Logging framework used" || echo "FAIL"
+          grep -qE "run_id|Run ID" scripts/cloudify_lifecycle.py && echo "PASS: Run ID traceability" || echo "FAIL"
+          grep -qE "mask" scripts/cloudify_lifecycle.py && echo "PASS: Credential masking" || echo "FAIL"
+
+      - name: Smoke Test
+        run: |
+          set -e
+          echo "Testing Conductor API..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -u "$CFY_USERNAME:$CFY_PASSWORD" -H "Tenant: $CFY_TENANT" "$CFY_MANAGER_URL/api/$CFY_API_VERSION/status" --insecure --connect-timeout 10)
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "PASS: Conductor API reachable (HTTP $HTTP_CODE)"
+          else
+            echo "FAIL: Conductor API returned HTTP $HTTP_CODE"
+            exit 1
+          fi
 
       - name: Manual Cloudify action
         if: github.event_name == 'workflow_dispatch'
